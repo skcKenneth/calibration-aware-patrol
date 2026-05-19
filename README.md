@@ -7,10 +7,6 @@ per-cell expected threat count**, and four allocation policies
 (*oracle*, *naive*, *calibrated point estimate*, *distributionally
 robust upper*) on a budget-constrained water-filling objective.
 
-Submission for the **AI4Nature Workshop at AVSS 2026** (Lecce,
-Italy). The paper is in `paper/main.tex`; this README documents the
-code.
-
 ## Gap addressed
 
 Camera-trap classifiers in current ecological deployments are
@@ -57,11 +53,7 @@ calibration-aware-patrol/
 │   └── allocation.py             # water-filling allocator + four policies
 ├── experiments/
 │   └── run_main.py               # main driver: single run + two sweeps
-├── figures/                      # output of run_main.py
-└── paper/
-    ├── main.tex                  # IEEE-format AI4Nature submission
-    ├── ref.bib
-    └── figs/                     # paper figures (= figures/)
+└── figures/                      # output of run_main.py
 ```
 
 ## Reproducing the results
@@ -131,17 +123,3 @@ outputs and image-level labels alone.
 ## License
 
 MIT for the code; figures and paper text CC-BY-4.0.
-
-## Citation
-
-If you use this code, please cite the paper:
-
-```bibtex
-@inproceedings{cdsj5_2026_pixels_patrols,
-  title     = {From Pixels to Patrols: A Calibration-Aware Sensor
-               Fusion Pipeline for Camera-Trap-Driven Anti-Poaching
-               Resource Allocation},
-  booktitle = {AI4Nature Workshop at AVSS},
-  year      = {2026}
-}
-```
