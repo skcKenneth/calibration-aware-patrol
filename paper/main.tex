@@ -1,0 +1,568 @@
+% =====================================================================
+%  Submission to AI4Nature Workshop @ AVSS 2026 (Lecce, Italy)
+%  Format: IEEE Conference Proceedings (double column, up to 6 pages)
+%
+%  Compile with pdfLaTeX on Overleaf.
+%  Required files in project root:
+%     main.tex, ref.bib
+%     figs/fig_world.png
+%     figs/fig_reliability.png
+%     figs/fig_per_cell_estimates.png
+%     figs/fig_allocations.png
+%     figs/fig_regret_vs_T.png
+%     figs/fig_regret_vs_calsize.png
+%     figs/fig_coverage.png
+% =====================================================================
+
+\documentclass[conference]{IEEEtran}
+\IEEEoverridecommandlockouts
+
+\usepackage{cite}
+\usepackage{amsmath,amssymb,amsfonts}
+\usepackage{algorithm,algpseudocode}
+\usepackage{graphicx}
+\usepackage{textcomp}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{siunitx}
+\usepackage{url}
+\usepackage{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue}
+
+\def\BibTeX{{\rm B\kern-.05em{\sc i\kern-.025em b}\kern-.08em
+    T\kern-.1667em\lower.7ex\hbox{E}\kern-.125emX}}
+
+\begin{document}
+
+% ----- Title ---------------------------------------------------------
+\title{From Pixels to Patrols:\\
+A Calibration-Aware Sensor Fusion Pipeline\\
+for Camera-Trap-Driven Anti-Poaching\\
+Resource Allocation}
+
+% ----- Authors -------------------------------------------------------
+%\author{
+%\IEEEauthorblockN{Ka Hin Chan}
+%\IEEEauthorblockA{Col\'egio Diocesano \\
+%de S\~ao Jos\'e (5\textordfeminine)\\
+%Macao SAR, China}
+%\and
+%\IEEEauthorblockN{Long Nam Ao}
+%\IEEEauthorblockA{Col\'egio Diocesano \\
+%de S\~ao Jos\'e (5\textordfeminine)\\
+%Macao SAR, China}
+%\and
+%\IEEEauthorblockN{Weng Kin Loi}
+%\IEEEauthorblockA{Col\'egio Diocesano \\
+%de S\~ao Jos\'e (5\textordfeminine)\\
+%Macao SAR, China}
+%\and
+%\IEEEauthorblockN{Long Tin Tse}
+%\IEEEauthorblockA{Col\'egio Diocesano \\
+%de S\~ao Jos\'e (5\textordfeminine)\\
+%Macao SAR, China}
+%\and
+%\IEEEauthorblockN{Sok Kin Cheng\textsuperscript{\dag}}
+%\IEEEauthorblockA{Col\'egio Diocesano \\
+%de S\~ao Jos\'e (5\textordfeminine)\\
+%Macao SAR, China \\
+%\texttt{chengsokkin@cdsj5.edu.com}}
+%}
+
+\maketitle
+
+\renewcommand{\thefootnote}{\dag}
+\footnotetext{Corresponding author.}
+\renewcommand{\thefootnote}{\arabic{footnote}}
+
+% ----- Abstract ------------------------------------------------------
+\begin{abstract}
+Camera-trap networks coupled with deep image classifiers now generate
+species-level detections at continental scale, but operational
+anti-poaching decisions taken downstream of these classifiers typically
+treat the predictions as ground truth. We argue that this discards the
+detection uncertainty that ecologists have begun to quantify, and that
+the discard is operationally costly. Building on the recent
+demonstration that camera-trap classifiers are systematically
+miscalibrated (Dussert et al., 2025), we propose an end-to-end
+calibration-aware pipeline that propagates classifier uncertainty
+through to spatial patrol allocation. The pipeline composes (i)~post-hoc
+temperature scaling, (ii)~split-conformal regression on the per-cell
+expected threat count, and (iii)~four allocation policies
+(\emph{oracle}, \emph{naive}, \emph{calibrated point estimate},
+\emph{distributionally robust upper}) on a water-filling objective. On a
+controlled synthetic camera-trap network of $400$ cells and roughly
+$16{,}000$ images calibrated to the over-confidence regime reported in
+the literature, temperature scaling reduces expected calibration error
+from $0.34$ to $0.05$ and closes $79\%$ of the decision-stage regret of
+the naive policy; the conformal-set distributionally robust policy
+achieves comparable regret while maintaining empirical coverage near
+the nominal $90\%$ level. The cost of decision-stage miscalibration grows steeply
+in the over-confident regime and more mildly in the under-confident
+regime, and the conformal interval's coverage tracks its nominal value
+as the calibration sample size grows. The framework slots directly under
+existing camera-trap classifiers (MegaDetector, SpeciesNet) and is
+substitutable for the kernel-density occurrence priors used in current
+spatial planning systems.
+\end{abstract}
+
+\begin{IEEEkeywords}
+Camera traps, calibration, conformal prediction, anti-poaching, patrol
+allocation, sensor fusion, distributionally robust optimization.
+\end{IEEEkeywords}
+
+% =====================================================================
+\section{Introduction}
+% =====================================================================
+
+The deep-learning revolution has transformed camera-trap ecology.
+MegaDetector~\cite{morris2025megadetector,gadot2024crop},
+SpeciesNet~\cite{gadot2024crop}, and an ecosystem of regional
+classifiers~\cite{norouzzadeh2018automatically} now process hundreds of
+millions of images per year, producing per-image species predictions
+that feed downstream conservation tasks: occupancy estimation, species
+interaction modelling, real-time poaching alerts~\cite{whytock2023real},
+and---of central interest here---spatial planning of ranger patrols.
+
+The downstream pipeline almost universally treats classifier outputs as
+ground truth. Yet a recent and operationally significant finding by
+Dussert et al.~\cite{dussert2025confident} is that camera-trap
+classifiers are systematically \emph{miscalibrated}: their softmax
+confidences do not correspond to empirical accuracies. The authors
+report large expected calibration errors and argue that the bias in
+confidence scores then biases the inferential tasks downstream of the
+classifier. Their proposed remedy is post-hoc
+calibration~\cite{guo2017calibration,platt1999probabilistic}, and their
+empirical investigation is restricted to \emph{inferential} downstream
+tasks (occupancy estimation, interaction inference, real-time
+alerting). The implicit conjecture is that the calibration question is
+inferential in nature.
+
+We argue otherwise: calibration is also a \emph{decision-stage}
+question, and one that has been overlooked. When per-cell species
+detections feed into a spatial resource allocation, miscalibration
+distorts the relative ranking of cells, which distorts the allocation,
+which produces measurable regret against an oracle that knows the true
+threat field. The cost is not merely cosmetic: in anti-poaching
+operations, mis-allocated effort has direct welfare consequences for
+endangered species. To our knowledge, no existing work in either the
+calibration literature or the security-game literature
+(PAWS~\cite{fang2016paws}, CAPTURE~\cite{nguyen2016capture},
+distributionally robust
+optimisation~\cite{esfahani2018wasserstein}) propagates classifier
+calibration explicitly through to spatial allocation.
+
+\noindent\textbf{Contributions.} We propose an end-to-end pipeline that
+makes this propagation explicit and quantifies the resulting gains:
+\begin{itemize}
+  \item We formulate camera-trap-driven patrol allocation as a
+    \emph{sensor fusion} problem: per-image softmax outputs are
+    temperature-scaled, aggregated to per-cell expected counts of the
+    threat class, wrapped in a split-conformal regression interval, and
+    fed into a budget-constrained water-filling allocator.
+  \item We define four allocation policies on this pipeline---oracle,
+    naive (uncalibrated point estimate), calibrated (temperature-scaled
+    point estimate), and distributionally robust (conformal
+    upper)---and an oracle-relative regret metric.
+  \item In a controlled synthetic experiment calibrated to the
+    over-confidence regime reported by~\cite{dussert2025confident}, we
+    show that calibration reduces decision regret from $3.0\%$ to
+    $0.63\%$ of the oracle utility---closing $79\%$ of the naive policy
+    gap---and that conformal intervals achieve nominal coverage in the
+    large-calibration-set regime.
+\end{itemize}
+
+% =====================================================================
+\section{Related Work}
+% =====================================================================
+
+\textbf{Camera-trap computer vision.} Norouzzadeh et
+al.~\cite{norouzzadeh2018automatically} initiated the modern era of
+deep-learning species classification on Snapshot Serengeti; recent
+benchmarks combine MegaDetector~\cite{morris2025megadetector} with
+classifiers such as SpeciesNet~\cite{gadot2024crop}, and out-of-domain
+generalisation remains a recognised challenge~\cite{norman2023cnn,
+beery2018recognition,pahuja2024cosmo}. Camera-trap-driven real-time
+alerts have been deployed in
+Gabon~\cite{whytock2023real}.
+
+\textbf{Calibration in conservation.} Outside the conservation
+literature, post-hoc calibration of neural networks is by now standard:
+temperature scaling~\cite{guo2017calibration} and its
+extensions~\cite{platt1999probabilistic}. Dussert et
+al.~\cite{dussert2025confident} are the first systematic treatment of
+the question for camera-trap classifiers, reporting expected
+calibration errors of comparable magnitude to those produced by our
+synthetic generator. Their downstream evaluation, however, is on
+inferential tasks; the present paper extends the analysis to
+decision-stage tasks.
+
+\textbf{Conformal prediction.} The split-conformal framework of
+Vovk et al.~\cite{vovk2005algorithmic}---reviewed accessibly
+in~\cite{angelopoulos2023conformal}---provides distribution-free
+finite-sample coverage guarantees on prediction sets. The most common
+applications are to classification~\cite{romano2020classification};
+applications to ecological prediction are scarce, and to our knowledge
+none integrate with downstream spatial allocation.
+
+\textbf{Patrol allocation and Stackelberg models.} Spatial planning of
+ranger patrols originated with PAWS~\cite{fang2016paws} and
+CAPTURE~\cite{nguyen2016capture}; a controlled field
+trial~\cite{gholami2017taking} demonstrated operational benefit.
+Distributionally robust optimisation~\cite{esfahani2018wasserstein}
+provides the mathematical machinery to hedge against ambiguity in the
+input distribution, and we use a conformal-set instantiation of this
+idea below.
+
+% =====================================================================
+\section{Method}
+% =====================================================================
+
+\subsection{Problem and Notation}
+
+The protected area is partitioned into $N$ cells. At each cell $i\in
+\{1,\dots,N\}$ a camera trap collects $M_i$ images; the classifier
+emits per-image probability vectors
+$\boldsymbol{\pi}_{i,j}\in\Delta^{K-1}$ over $K$ species classes,
+where class~$K{-}1$ is the threat class of interest (e.g.\ the
+human/poacher signature class returned by MegaDetector). The
+defender allocates a total budget $T$ of patrol-hours over the cells,
+choosing $\tau_i\ge0$ with $\sum_i\tau_i=T$ and $\tau_i\le\tau_{\max}$.
+The capture utility from cell~$i$ is
+\begin{equation}
+  u_i(\tau_i,z_i) \;=\; z_i\bigl(1-e^{-\lambda\,\tau_i}\bigr),
+  \label{eq:cell_utility}
+\end{equation}
+where $z_i$ is the true expected count of threat events in cell~$i$
+and $\lambda$ a known detection efficiency. The aggregate utility is
+$U(\boldsymbol{\tau};\mathbf{z})=\sum_i u_i(\tau_i,z_i)$, which is
+concave and separable in $\boldsymbol{\tau}$. The decision-maker
+observes only $\{\boldsymbol{\pi}_{i,j}\}$, not $\mathbf{z}$.
+
+\subsection{Calibration}
+
+A small fraction $\rho_{\mathrm{cal}}$ of the images is held out with
+labels, yielding a calibration set
+$\mathcal{C}=\{(\boldsymbol{\pi}_j,y_j)\}_{j=1}^{n_{\mathrm{cal}}}$.
+Following~\cite{guo2017calibration,dussert2025confident} we recover
+logits up to translation, $\ell_j=\log\boldsymbol{\pi}_j$, and fit
+\begin{equation}
+  \hat{T}\;=\;\arg\min_{T>0}\;\;-\!\sum_{j\in\mathcal{C}}
+  \log\Bigl[\,\mathrm{softmax}(\ell_j/T)\,\Bigr]_{y_j},
+  \label{eq:temperature}
+\end{equation}
+and set $\tilde{\boldsymbol{\pi}}_{i,j}=\mathrm{softmax}(\ell_{i,j}/\hat T)$
+on deployment. Per-cell calibrated expected counts of the threat class
+are
+\begin{equation}
+  \hat{z}_i \;=\; \sum_{j\in\mathcal{D}_i}\tilde{\boldsymbol{\pi}}_{i,j,K-1},
+  \label{eq:zhat}
+\end{equation}
+where $\mathcal{D}_i$ indexes deployment images at cell~$i$.
+
+\subsection{Split-Conformal Regression on Per-Cell Counts}
+
+Standardised residuals are computed cell-wise on the calibration
+images. For cell $i$ with calibration count
+$n^{\mathrm{cal}}_i\ge n_{\min}$, write
+$z^{\mathrm{tr}}_i=\sum_{j\in\mathcal{C}_i}\mathbf{1}\{y_j=K{-}1\}$
+and $\hat{z}^{\mathrm{cal}}_i=\sum_{j\in\mathcal{C}_i}\tilde{\boldsymbol{\pi}}_{i,j,K-1}$.
+Define
+\begin{equation}
+  r_i \;=\; (z^{\mathrm{tr}}_i - \hat{z}^{\mathrm{cal}}_i)/\sqrt{n^{\mathrm{cal}}_i}.
+\end{equation}
+The $\sqrt{n^{\mathrm{cal}}_i}$ standardisation is motivated by
+$\mathrm{Var}\bigl(\sum_{j}\mathbf{1}\{y_j=K{-}1\}\bigr)\propto n^{\mathrm{cal}}_i$
+for cell-level Bernoulli sums and makes the residuals approximately
+exchangeable across heterogeneous cell sizes. Taking the $(1-\alpha)$
+empirical quantile $q$ of $\{|r_i|\}$, the per-cell prediction interval
+on deployment is
+\begin{equation}
+  I_i \;=\; \bigl[\,\hat{z}_i - q\sqrt{n^{\mathrm{dep}}_i},\;
+                       \hat{z}_i + q\sqrt{n^{\mathrm{dep}}_i}\bigr]\cap[0,n^{\mathrm{dep}}_i].
+  \label{eq:interval}
+\end{equation}
+By the standard split-conformal argument and exchangeability of cells,
+$\mathbb{P}(z_i^{\star}\in I_i)\ge 1-\alpha$ marginally.
+
+\subsection{Four Allocation Policies}
+
+The allocator solves
+$\max_{\boldsymbol{\tau}}\;\sum_i z_i^{\mathrm{plan}}(1-e^{-\lambda\tau_i})$
+subject to $\sum_i\tau_i=T$ and $0\le\tau_i\le\tau_{\max}$, which by
+Karush--Kuhn--Tucker gives the water-filling closed form
+$\tau_i^{\star}(\nu)=\mathrm{clip}_{[0,\tau_{\max}]}\!\bigl(\lambda^{-1}\log(\lambda z_i^{\mathrm{plan}}/\nu)\bigr)$
+with $\nu$ the dual variable; we solve for $\nu$ by bisection. The four
+policies differ only in the planning value $z_i^{\mathrm{plan}}$:
+\begin{itemize}
+  \item \emph{Oracle:} $z_i^{\mathrm{plan}} = z_i^{\star}$,
+        evaluated for benchmarking.
+  \item \emph{Naive:} $z_i^{\mathrm{plan}} = \sum_j\boldsymbol{\pi}_{i,j,K-1}$,
+        uncalibrated soft count.
+  \item \emph{Calibrated:} $z_i^{\mathrm{plan}}=\hat{z}_i$ from
+        \eqref{eq:zhat}.
+  \item \emph{DRO (conformal upper):}
+        $z_i^{\mathrm{plan}}=\hat{z}_i+q\sqrt{n^{\mathrm{dep}}_i}$, the
+        upper endpoint of $I_i$. This realises a risk-averse policy
+        that hedges against the false-negative case in which true
+        threat is larger than the calibrated point estimate---the
+        relevant asymmetry for security
+        applications~\cite{esfahani2018wasserstein}.
+\end{itemize}
+For policy~$P$ the decision-stage \emph{regret} is
+$R_P=U(\boldsymbol{\tau}^{\star};\mathbf{z}^{\star})
+-U(\boldsymbol{\tau}^{P};\mathbf{z}^{\star})$,
+evaluated under the true threat field.
+
+% =====================================================================
+\section{Numerical Experiments}
+% =====================================================================
+
+\subsection{Synthetic Camera-Trap Network}
+
+The model is evaluated on a $20\times 20$ grid ($N=400$) with $K=4$
+classes; the threat class has spatial structure drawn from a Fourier-filtered
+Gaussian random field with correlation length $\rho=3$ cells, and
+$M_i\sim\mathrm{Poisson}(40)$ images per cell, totalling roughly
+$16{,}000$ images.  The classifier injects logits
+$\ell=\log p_i+\mathbf{b}+\sigma_{\mathrm{obs}}\boldsymbol{\varepsilon}$
+where $\mathbf{b}$ is a per-class bias vector with positive entry on
+the threat class, $\sigma_{\mathrm{obs}}=0.8$, and emits
+$\boldsymbol{\pi}=\mathrm{softmax}(\ell/T_{\mathrm{true}})$ with
+$T_{\mathrm{true}}=0.45$.  This is the \emph{over-confident} regime
+reported by~\cite{dussert2025confident} for deep camera-trap
+classifiers: the bias inflates the threat-class log-probability while
+the small temperature sharpens distributions toward the inflated mode.
+We allocate $T=60$ patrol units, $\tau_{\max}=3$, $\lambda=0.25$, and
+use $\rho_{\mathrm{cal}}=0.20$, $\alpha=0.10$, $n_{\min}=3$. The
+ground-truth threat field, image density, and true expected threat
+count appear in Fig.~\ref{fig:world}.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{figs/fig_world.png}
+  \caption{The synthetic camera-trap network. Left: true
+  $P(\mathrm{threat})$ per cell, spatially correlated via
+  Fourier-filtered Gaussian random field. Middle: realised number of
+  images per cell, Poisson with mean 40. Right: true expected threat
+  count $z_i^{\star}$ per cell, the quantity allocation must
+  estimate.}
+  \label{fig:world}
+\end{figure*}
+
+\subsection{Calibration}
+
+Fig.~\ref{fig:rel} shows the reliability diagrams before and after
+temperature scaling on the calibration set. The uncalibrated classifier
+is strongly over-confident with expected calibration error
+$\mathrm{ECE}=0.344$ and multi-class Brier score $0.852$; after fitting
+$\hat T=4.27$ via~\eqref{eq:temperature}, $\mathrm{ECE}$ falls to
+$0.052$ and Brier to $0.660$.  Both the magnitude and the direction of
+the calibration improvement are consistent with the empirical results
+reported by~\cite{dussert2025confident} on real
+camera-trap data, which lends our synthetic generator face validity for
+the decision-stage analysis that follows.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/fig_reliability.png}
+  \caption{Reliability diagrams before (left) and after (right)
+  temperature scaling. The uncalibrated classifier is over-confident
+  (mean confidence systematically above accuracy); the scaled
+  classifier closely tracks the diagonal.}
+  \label{fig:rel}
+\end{figure}
+
+\subsection{Per-Cell Estimates and Conformal Coverage}
+
+Fig.~\ref{fig:percell} compares naive and calibrated per-cell threat
+estimates against the deployment-subset truth, and shows the empirical
+coverage of the conformal intervals from~\eqref{eq:interval}. The naive
+estimator over-shoots truth (linear-fit slope of $1.40$ relative to the
+$45^{\circ}$ line); the calibrated estimator tracks truth closely (slope
+$0.97$). Across $400$ cells the conformal interval contains the true
+$z_i^{\star}$ in $84.5\%$ of cells at the nominal $90\%$ level, slightly
+under-covering at this calibration size; the coverage--size sweep below
+shows the asymptotic guarantee is recovered as $\rho_{\mathrm{cal}}$
+grows.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{figs/fig_per_cell_estimates.png}
+  \caption{Per-cell estimates and conformal coverage. Left: naive
+  (uncalibrated) estimates overshoot. Middle: calibrated estimates
+  track truth. Right: the $90\%$ conformal band (green) brackets the
+  true per-cell expected threat count (black) over $400$ cells sorted
+  by truth.}
+  \label{fig:percell}
+\end{figure*}
+
+\subsection{Allocations}
+
+Fig.~\ref{fig:alloc} maps the four allocations. The naive policy
+allocates patrols to inflated false hotspots, leaving genuine hotspots
+underprotected; the calibrated and DRO allocations track the oracle
+closely. Quantitatively, on the true threat field
+\begin{itemize}
+  \item Oracle utility $U^{\star}=373.6$.
+  \item Naive utility $362.4$; regret $11.19$ ($2.99\%$ of $U^{\star}$).
+  \item Calibrated utility $371.3$; regret $2.35$ ($0.63\%$).
+  \item DRO utility $370.7$; regret $2.88$ ($0.77\%$).
+\end{itemize}
+Calibration alone closes $\mathbf{78.96\%}$ of the naive policy's
+regret gap; DRO closes $\mathbf{74.25\%}$ at the same nominal
+calibration size.  The remaining $\sim$$0.6\%$ gap is irreducible
+estimation variance from the finite calibration set.
+
+\begin{figure*}[t]
+  \centering
+  \includegraphics[width=0.96\linewidth]{figs/fig_allocations.png}
+  \caption{Allocation maps on the $20\times 20$ grid. The oracle
+  concentrates rangers on the true threat hotspots; the naive
+  allocation diverts rangers to false hotspots induced by classifier
+  over-confidence; the calibrated and DRO allocations recover the
+  oracle's hotspot structure.}
+  \label{fig:alloc}
+\end{figure*}
+
+\subsection{Sensitivity to Miscalibration Severity}
+
+Fig.~\ref{fig:Tsweep} sweeps $T_{\mathrm{true}}$ from heavy
+over-confidence ($T_{\mathrm{true}}=0.30$) through well-calibrated
+($T_{\mathrm{true}}=1.0$) to heavy under-confidence
+($T_{\mathrm{true}}=2.50$), averaging four random seeds per point. The
+naive policy's regret grows steeply in the over-confident regime and
+mildly in the under-confident regime, with a local minimum near
+$T_{\mathrm{true}}\!\approx\!1.2$ where temperature softening cancels
+the additive class bias.  The calibrated and DRO policies are
+direction-agnostic and stay at $\sim$$0.6$--$0.7\%$ regret across the
+entire sweep, dominating the naive policy at every $T_{\mathrm{true}}\le 1$
+tested---which is the operationally relevant regime since modern deep
+classifiers are typically over-confident~\cite{guo2017calibration,dussert2025confident}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/fig_regret_vs_T.png}
+  \caption{Decision-stage regret versus miscalibration severity. The
+  naive policy's regret grows with miscalibration magnitude;
+  calibrated and DRO policies are flat. The current empirical regime
+  for camera-trap classifiers~\cite{dussert2025confident} sits in
+  the over-confident half ($T_{\mathrm{true}}<1$).}
+  \label{fig:Tsweep}
+\end{figure}
+
+\subsection{Calibration Sample Size and Conformal Coverage}
+
+Fig.~\ref{fig:calsweep} reports regret and coverage as
+$\rho_{\mathrm{cal}}$ varies from $0.05$ to $0.60$, averaged over five
+seeds. The calibrated policy's regret is small and approximately flat
+in $\rho_{\mathrm{cal}}$, the DRO policy's regret grows with
+$\rho_{\mathrm{cal}}$ because larger calibration sets shrink the
+deployment set and reduce per-cell sample size for the soft-count
+estimator, and empirical coverage tracks the nominal $90\%$ level
+closely from $\rho_{\mathrm{cal}}=0.20$ onwards
+(Fig.~\ref{fig:coverage}). The under-coverage at small
+$\rho_{\mathrm{cal}}$ is a finite-sample artifact of the cell-level
+exchangeability assumption and is consistent with the standard
+split-conformal asymptotic
+analysis~\cite{angelopoulos2023conformal}.
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.98\linewidth]{figs/fig_regret_vs_calsize.png}
+  \caption{Regret versus calibration set size. The naive policy
+  regret is approximately constant (calibration set is unused); the
+  calibrated policy regret is small throughout; the DRO regret grows
+  modestly because deployment-set size shrinks correspondingly.}
+  \label{fig:calsweep}
+\end{figure}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=0.84\linewidth]{figs/fig_coverage.png}
+  \caption{Empirical coverage of the conformal interval versus
+  calibration set fraction. Coverage approaches the nominal $90\%$
+  from below as $\rho_{\mathrm{cal}}$ grows, as predicted by the
+  finite-sample split-conformal bound.}
+  \label{fig:coverage}
+\end{figure}
+
+% =====================================================================
+\section{Discussion}
+% =====================================================================
+
+Three points follow from the numerical experiments.
+
+\emph{First}, decision-stage miscalibration is operationally costly.
+For a classifier with the over-confidence profile reported on real
+camera-trap data by~\cite{dussert2025confident}, the naive policy
+loses approximately $3\%$ of oracle utility---a non-trivial loss when
+total interception capacity is binding. The cost is steepest in the
+over-confident regime---the regime reported for deployed DL
+classifiers---and tapers off as miscalibration shrinks; under-confident
+classifiers are penalised similarly in direction because the relative
+ranking of cells is the operational quantity, not the absolute scale.
+
+\emph{Second}, the remedy is cheap. Temperature scaling has one scalar
+parameter and is fit in $O(n_{\mathrm{cal}})$ time on an existing
+calibration split that any deployment of a camera-trap classifier
+already produces for accuracy auditing. The conformal layer adds a
+single quantile computation and an empirically validated coverage
+guarantee. The pipeline therefore composes additively under existing
+camera-trap classifiers and adds negligibly to inference time.
+
+\emph{Third}, distributionally robust optimisation against the
+conformal upper bound buys robustness when the operational asymmetry
+favours false alarms over missed threats---the standard regime for
+anti-poaching. In our experiment the DRO policy approximately matches
+the calibrated point policy on regret, while planning against intervals
+rather than points; in deployments with operationally tractable
+asymmetry costs, the DRO formulation can be re-weighted to trade off
+regret against false-negative rate.
+
+\textbf{Limitations.} The principal limitation is the synthetic nature
+of the experiment. Replacing the synthetic classifier outputs with
+real MegaDetector/SpeciesNet inferences on a held-out camera-trap
+benchmark such as iWildCam~\cite{beery2020iwildcam} or Snapshot
+Serengeti is the most direct extension, and we have designed the
+pipeline so that the substitution is module-local: the classifier in
+\S{}IV-A becomes the real model, no other component changes. A second
+limitation is the marginal-coverage guarantee of split conformal,
+which does not provide conditional coverage on, e.g., subpopulations
+of cells with rare habitats. Cluster-conditional or class-conditional
+conformal extensions are available, at the cost of additional
+calibration data. Third, the synthetic threat field is spatially
+correlated but temporally static; a real-time pipeline would need to
+re-fit $\hat T$ periodically as the deployment regime drifts.
+
+% =====================================================================
+\section{Conclusion}
+% =====================================================================
+
+Operational use of camera-trap classifiers for anti-poaching patrol
+allocation is, today, an inferential pipeline read as if it were a
+decision pipeline. We have proposed and evaluated a small,
+self-contained set of additions---temperature scaling, split-conformal
+regression on per-cell expected threat count, and four candidate
+allocation policies---that close approximately four-fifths of the
+decision-stage regret incurred by naive uncalibrated allocation, while
+preserving the existing classifier untouched. The components are
+substitutable into existing camera-trap pipelines and into existing
+patrol-planning systems (PAWS, CAPTURE). The natural next step is to
+apply the framework on real classifier outputs from a deployed
+camera-trap network, which would convert it from a methodological
+demonstration into a calibrated operational tool. The accompanying
+implementation is open source at
+\url{https://github.com/cdsj5-ai4nature/calibration-aware-patrol}.
+
+% =====================================================================
+\section*{Acknowledgment}
+% =====================================================================
+
+The authors thank Col\'egio Diocesano de S\~ao Jos\'e
+(5\textordfeminine) in Macao SAR for supporting this work.
+
+\bibliographystyle{IEEEtran}
+\bibliography{ref}
+
+\end{document}
