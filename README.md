@@ -1,125 +1,171 @@
-# From Pixels to Patrols: Calibration-Aware Anti-Poaching
+# Calibration-Aware Patrol Allocation
 
-End-to-end pipeline that propagates camera-trap classifier
-uncertainty through to spatial patrol allocation, comprising
-**temperature scaling**, **split-conformal regression on the
-per-cell expected threat count**, and four allocation policies
-(*oracle*, *naive*, *calibrated point estimate*, *distributionally
-robust upper*) on a budget-constrained water-filling objective.
+A reproducible synthetic pipeline for studying how camera-trap probability
+calibration affects spatial patrol decisions. The final class is treated as a
+**human-presence risk proxy**, not as a direct poacher label.
 
-## Gap addressed
+This revision corrects the main methodological issues in the first release:
+calibrator fitting, metric evaluation, interval-width calibration, and
+operational deployment now use separate image batches; calibration is measured
+for the decision-relevant class; and the former conformal/DRO terminology has
+been replaced by claims supported by the implementation.
 
-Camera-trap classifiers in current ecological deployments are
-*systematically miscalibrated* (Dussert et al., 2025). Existing
-calibration work covers inferential downstream tasks (occupancy,
-interaction inference, alerts) but **not** decision-stage tasks like
-patrol allocation. We close that gap: we measure how much the
-miscalibration costs at the decision stage, and how cheaply
-standard post-hoc calibration plus a conformal regression layer
-recovers it.
+## Corrected pipeline
 
-## Headline results
+1. **Synthetic landscape and independent batches**
+   (`src/synthetic.py`)
+   - A spatially correlated latent class-probability field is generated over a
+     20 × 20 grid.
+   - Four conditionally independent image batches are sampled:
+     `temperature_fit`, `evaluation`, `interval_calibration`, and `deployment`.
+   - The deployment batch contains about 16,000 images in the default setting.
 
-On a synthetic camera-trap network of 400 cells and ~16,000
-images, calibrated to the over-confidence regime reported in the
-literature (`T_true = 0.45`, classifier ECE = 0.34):
+2. **Multiclass temperature scaling**
+   (`src/calibration.py`)
+   - One positive temperature is fitted by minimising multiclass NLL on the
+     `temperature_fit` batch.
+   - Top-label ECE, Brier score, and NLL are reported only on the independent
+     `evaluation` batch.
 
-| Metric                                           | Value   |
-| ------------------------------------------------ | ------- |
-| ECE before / after temperature scaling           | 0.344 / 0.052 |
-| Brier score before / after                       | 0.852 / 0.660 |
-| Recovered temperature $\hat T$                   | 4.27     |
-| Naive policy regret (% of oracle utility)        | 2.99%    |
-| Calibrated policy regret                         | 0.63%    |
-| DRO (conformal upper) regret                     | 0.77%    |
-| **% of naive regret closed by calibration**      | **78.96%** |
-| **% of naive regret closed by DRO**              | **74.25%** |
-| Empirical conformal coverage (nominal 90%)       | 0.845    |
+3. **Decision-specific threat calibration**
+   - A monotone binary Platt model is fitted for the risk-proxy class.
+   - Risk-class ECE, Brier score, and reliability curves are reported alongside
+     the conventional top-label metrics.
 
-Sensitivity sweeps in `experiments/run_main.py` confirm the gain is
-monotone in miscalibration severity and that empirical conformal
-coverage approaches its nominal value as the calibration set grows.
+4. **Realised-count predictive intervals**
+   - Calibrated image probabilities induce an exact Poisson-binomial count
+     distribution in each cell.
+   - A separate, deployment-sized labelled batch selects an integer interval
+     expansion margin to account for residual model misspecification.
+   - Final coverage is evaluated against **realised deployment counts**, not the
+     unknown latent expected count.
+   - No distribution-free conformal guarantee is claimed.
+
+5. **Patrol allocation**
+   (`src/allocation.py`)
+   - `water_fill()` solves the fixed-budget concave allocation problem.
+   - The evaluated policies are oracle, naive, temperature-scaled,
+     task-calibrated point estimate, and predictive upper-bound.
+   - The upper policy is an interval-based risk policy; it is **not** described
+     as distributionally robust optimisation.
+
+6. **Asymmetric operational-cost analysis**
+   - A second objective combines missed-event cost with patrol-hour cost:
+
+     `miss_cost × Σ z_i exp(-λτ_i) + Σ c_i τ_i`.
+
+   - The experiment compares point and upper-bound planning on both the nominal
+     expected field and an upper-bound stress field.
+
+## Default results
+
+The full default run uses 20 random seeds for the main summary and 8 seeds per
+sensitivity setting. Selected multi-seed results are:
+
+| Metric | Mean ± SD |
+|---|---:|
+| Top-label ECE, raw | 0.341 ± 0.010 |
+| Top-label ECE, temperature-scaled | 0.048 ± 0.010 |
+| Risk-class ECE, raw | 0.111 ± 0.013 |
+| Risk-class ECE, temperature-scaled | 0.057 ± 0.005 |
+| Risk-class ECE, Platt-calibrated | 0.017 ± 0.005 |
+| Naive regret (% oracle utility) | 2.64 ± 0.51% |
+| Temperature-scaled regret | 0.54 ± 0.21% |
+| Task-calibrated regret | 0.33 ± 0.08% |
+| Predictive upper-bound regret | 0.34 ± 0.15% |
+| Naive regret closed by task calibration | 87.46 ± 2.20% |
+| Calibrated predictive-interval coverage | 0.932 ± 0.020 |
+
+The single seed used for the main figures has 0.900 base Poisson-binomial
+coverage; the held-out interval calibration chooses a one-count expansion and
+yields 0.953 deployment coverage. Exact values are stored in `results.json`.
 
 ## Repository layout
 
-```
+```text
 calibration-aware-patrol/
+├── CHANGELOG.md
+├── CITATION.cff
+├── LICENSE
 ├── README.md
 ├── requirements.txt
-├── results.json                  # numerical results from running run_main.py
-├── src/
-│   ├── synthetic.py              # synthetic camera-trap world + classifier
-│   ├── calibration.py            # temperature scaling + split conformal
-│   └── allocation.py             # water-filling allocator + four policies
+├── requirements-dev.txt
+├── results.json
+├── results_seed_level.csv
 ├── experiments/
-│   └── run_main.py               # main driver: single run + two sweeps
-└── figures/                      # output of run_main.py
+│   └── run_main.py
+├── figures/
+├── src/
+│   ├── allocation.py
+│   ├── calibration.py
+│   ├── figure_style.py
+│   └── synthetic.py
+└── tests/
 ```
 
-## Reproducing the results
+## Installation and reproduction
+
+Python 3.10 or newer is recommended.
 
 ```bash
 python -m pip install -r requirements.txt
 python experiments/run_main.py
 ```
 
-This runs the headline single-world pipeline, the $T_{\mathrm{true}}$
-sweep, and the calibration-fraction sweep. Outputs land in
-`figures/` (PNG plots) and `results.json` (all numerical values
-quoted in the paper).
+A faster validation run is available:
 
-Total runtime is under 30 seconds on a 2020-era laptop CPU; no GPU
-or model downloads are required.
+```bash
+python experiments/run_main.py --quick
+```
 
-## Method walkthrough
+Outputs:
 
-1. **Synthetic world** (`src/synthetic.py`).
-   `make_world()` returns ground-truth per-cell class probabilities
-   drawn from a Fourier-filtered Gaussian random field, the realised
-   image counts per cell, and a classifier that emits softmax
-   outputs with controllable miscalibration `T_true` and per-class
-   bias `bias_threat`. Setting `T_true < 1` produces over-confidence
-   in the style reported for real DL camera-trap classifiers.
+- `results.json`: headline, multi-seed, sensitivity, and asymmetric-cost results
+- `results_seed_level.csv`: raw seed-level metrics
+- `figures/`: regenerated 600-dpi PNG and vector PDF/SVG figures
 
-2. **Calibration** (`src/calibration.py`).
-   `fit_temperature()` minimises NLL of `softmax(logits/T)` on the
-   calibration set via `scipy.optimize.minimize_scalar`. ECE and
-   reliability diagrams are 15-bin estimators on
-   maximum-confidence/correctness pairs.
+The full default experiment takes roughly 30 seconds on the current CPU-only
+test environment. No model download or GPU is required.
 
-3. **Split-conformal regression on per-cell expected count.**
-   `conformal_residuals()` computes the standardised residual
-   `r_i = (z_true_cal_i - z_hat_cal_i) / sqrt(n_cal_i)` per cell,
-   `conformal_quantile()` returns the $(1-\alpha)$ empirical
-   quantile of `|r_i|`, and `per_cell_intervals()` produces a
-   prediction interval $\hat z_i \pm q \sqrt{n^{\mathrm{dep}}_i}$ on
-   the deployment set. The $\sqrt{n}$ normalisation makes residuals
-   approximately exchangeable across heterogeneous cell sizes.
+### Figure style
 
-4. **Allocation** (`src/allocation.py`).
-   `water_fill()` solves
-   $\max\sum_i z_i (1 - e^{-\lambda \tau_i})$ subject to a budget
-   and per-cell cap by bisection on the KKT dual variable. Four
-   policy wrappers (`policy_oracle`, `policy_naive`,
-   `policy_calibrated`, `policy_dro_upper`) plug different planning
-   values $z^{\mathrm{plan}}$ into the same allocator.
+The plotting code uses a compact editorial style suitable for two-column
+scientific manuscripts: restrained colour-blind-safe accents, lowercase panel
+labels, thin axes, outward ticks, and uncertainty bands for multi-seed results.
+The style is inspired by common Nature/Science figure conventions rather than
+being an exact copy of either journal's production template.  Shared settings
+are defined in `src/figure_style.py`.
 
-5. **Evaluation.** Regret = $U(\boldsymbol{\tau}_{\mathrm{oracle}};
-   \mathbf{z}^{\star}) - U(\boldsymbol{\tau}_{\mathrm{policy}};
-   \mathbf{z}^{\star})$, evaluated on the true threat field, and
-   reported as a percentage of oracle utility.
+## Tests
 
-## Real-data extension
+```bash
+python -m pip install -r requirements-dev.txt
+pytest -q
+```
 
-The pipeline is module-local in the classifier. Replacing
-`src/synthetic.py` with a real classifier (e.g.
-[MegaDetector](https://github.com/agentmorris/MegaDetector) +
-[SpeciesNet](https://github.com/google/cameratrapai) on
-[iWildCam](https://github.com/visipedia/iwildcam_comp) or Snapshot
-Serengeti) gives a real-data instantiation; no other module
-changes. The calibration and conformal layers operate on softmax
-outputs and image-level labels alone.
+The tests check:
 
-## License
+- exact budget and per-cell cap satisfaction;
+- agreement of water-filling with a generic constrained optimiser;
+- temperature-scaling NLL improvement;
+- monotonic binary calibration;
+- a known Poisson-binomial distribution;
+- fixed deployment data during calibration-size sweeps; and
+- basic end-to-end interval and allocation invariants.
 
-MIT for the code; figures and paper text CC-BY-4.0.
+## Interpretation and deployment cautions
+
+- A person detection is not equivalent to a poacher detection. Real systems
+  should combine human-presence alerts with authorised-person records, patrol
+  logs, access routes, time, vehicle detections, and local operational context.
+- Predictive intervals rely on the calibrated probability model and the
+  representativeness of the interval-calibration batch. Seasonal or hardware
+  shifts require re-evaluation and possibly recalibration.
+- The synthetic experiments establish a controlled methodological result, not
+  evidence of field effectiveness.
+
+## Licence and citation
+
+The code is released under the MIT License. Citation metadata is provided in
+`CITATION.cff`. Generated figures and the accompanying paper may be distributed
+under their separately stated licence.

@@ -1,0 +1,10 @@
+cff-version: 1.2.0
+message: "Please cite the accompanying paper when using this software."
+title: "Calibration-Aware Patrol Allocation"
+type: software
+authors:
+  - name: "Calibration-Aware Patrol Allocation contributors"
+repository-code: "https://github.com/skckenneth/calibration-aware-patrol"
+license: MIT
+version: "0.2.1"
+date-released: 2026-06-18

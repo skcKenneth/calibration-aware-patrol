@@ -1,27 +1,22 @@
-"""
-Main experiment: end-to-end calibration-aware patrol allocation pipeline.
+"""Run the corrected calibration-aware patrol-allocation experiments.
 
-Outputs (saved to ./figures/):
-  fig_world.png             -- truth threat field + camera-trap network
-  fig_reliability.png       -- reliability diagram before/after calibration
-  fig_per_cell_estimates.png -- naive vs calibrated per-cell threat estimates
-                                + conformal interval coverage panel
-  fig_allocations.png        -- oracle / naive / calibrated / DRO allocations
-  fig_regret_vs_T.png        -- regret vs miscalibration severity (T_true)
-  fig_regret_vs_calsize.png  -- regret vs calibration set size
-  fig_coverage.png           -- conformal interval empirical coverage
+Key safeguards relative to the first release:
 
-Numbers (printed and also saved to ./results.json):
-  ECE / Brier before / after calibration
-  Recovered temperature T_hat
-  Per-policy utility, regret, regret-closed-percent
-  Empirical conformal coverage
+* calibrator fitting, metric evaluation, and deployment use independent data;
+* decision calibration is assessed for the operational risk-proxy class;
+* count intervals are Poisson-binomial predictive intervals for realised counts;
+* the upper policy is named predictive upper-bound, not DRO;
+* calibration-size sweeps keep evaluation and deployment data fixed;
+* an explicit missed-event/patrol-cost experiment evaluates asymmetric costs.
 """
 from __future__ import annotations
 
+import argparse
+import csv
 import json
 import sys
 from pathlib import Path
+from typing import Any
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -29,318 +24,1070 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from src.synthetic import WorldConfig, make_world, split_calibration
-from src.calibration import (
-    gather_calibration, fit_temperature, apply_temperature, ece,
-    reliability_curve, expected_count, conformal_residuals,
-    conformal_quantile, per_cell_intervals, empirical_coverage,
+from src.allocation import (  # noqa: E402
+    cost_sensitive_allocate,
+    operational_loss,
+    policy_calibrated,
+    policy_naive,
+    policy_oracle,
+    policy_predictive_upper,
+    policy_temperature_scaled,
+    regret,
+    utility,
 )
-from src.allocation import (
-    policy_oracle, policy_naive, policy_calibrated, policy_dro_upper,
-    utility, regret,
+from src.calibration import (  # noqa: E402
+    apply_binary_platt,
+    apply_temperature,
+    binary_brier,
+    binary_ece,
+    binary_reliability_curve,
+    calibrate_interval_expansion,
+    empirical_coverage,
+    expand_predictive_intervals,
+    expected_count_from_probability,
+    fit_binary_platt,
+    fit_temperature,
+    get_flat_batch,
+    multiclass_brier,
+    negative_log_likelihood,
+    per_cell_predictive_intervals,
+    realised_count,
+    subsample_flat_batch,
+    top_label_ece,
+    top_label_reliability_curve,
+)
+from src.synthetic import World, WorldConfig, make_world  # noqa: E402
+from src.figure_style import (  # noqa: E402
+    COLORS,
+    DOUBLE_COLUMN,
+    PATROL_CMAP,
+    SINGLE_COLUMN,
+    apply_editorial_style,
+    clean_axis,
+    compact_legend,
+    panel_label,
+    save_figure,
+    shade_uncertainty,
 )
 
 
 FIGDIR = ROOT / "figures"
 FIGDIR.mkdir(exist_ok=True)
-RESULTS = {}
-
-plt.rcParams.update({
-    "figure.dpi": 110,
-    "savefig.dpi": 200,
-    "font.size": 9,
-    "axes.spines.top": False,
-    "axes.spines.right": False,
-    "axes.titlesize": 10,
-    "axes.labelsize": 9,
-    "font.family": "DejaVu Sans",
-})
+apply_editorial_style()
 
 
-def brier(pi: np.ndarray, y: np.ndarray) -> float:
-    K = pi.shape[1]
-    onehot = np.zeros_like(pi)
-    onehot[np.arange(len(y)), y] = 1.0
-    return float(((pi - onehot) ** 2).sum(axis=1).mean())
+def pipeline(
+    cfg: WorldConfig | None = None,
+    *,
+    world: World | None = None,
+    fit_fraction: float = 1.0,
+    fit_subsample_seed: int = 0,
+    alpha: float = 0.10,
+    budget: float = 60.0,
+    lam: float = 0.25,
+    tau_max: float = 3.0,
+) -> dict[str, Any]:
+    """Run one end-to-end experiment without reusing labels across roles."""
+    if world is None:
+        world = make_world(cfg or WorldConfig())
+    cfg = world.cfg
+    n_cells = world.N
+    threat_class = world.threat_class
 
+    fit_pool = get_flat_batch(world, "temperature_fit")
+    fit = subsample_flat_batch(
+        fit_pool,
+        fit_fraction,
+        seed=fit_subsample_seed,
+    )
+    evaluation = get_flat_batch(world, "evaluation")
+    interval_calibration = get_flat_batch(world, "interval_calibration")
+    deployment = get_flat_batch(world, "deployment")
 
-# ---------------------------------------------------------------------------
-# Single-world pipeline
-# ---------------------------------------------------------------------------
-def pipeline(cfg: WorldConfig, frac_cal: float, alpha: float,
-             budget: float, lam: float, tau_max: float, cal_seed: int = 0):
-    world = make_world(cfg)
-    N = cfg.L ** 2
-    threat = cfg.K - 1
-    is_cal = split_calibration(world, frac_cal=frac_cal, seed=cal_seed)
-    b = gather_calibration(world, is_cal)
-    pi_cal, y_cal = b["pi_cal"], b["y_cal"]
-    pi_dep = b["pi_dep"]
-    cell_cal, cell_dep = b["cell_cal"], b["cell_dep"]
-
-    T_hat = fit_temperature(pi_cal, y_cal)
-    pi_cal_T = apply_temperature(pi_cal, T_hat)
-    pi_dep_T = apply_temperature(pi_dep, T_hat)
-
-    z_naive, n_dep = expected_count(pi_dep, cell_dep, N, threat)
-    z_cal, _       = expected_count(pi_dep_T, cell_dep, N, threat)
-    z_true_dep     = n_dep * world.p_true[:, threat]
-
-    residuals, _ = conformal_residuals(pi_cal_T, y_cal, cell_cal, N, threat,
-                                       n_min=3)
-    q = conformal_quantile(residuals, alpha=alpha)
-    z_hat_cf, z_lo, z_hi, _ = per_cell_intervals(pi_dep_T, cell_dep, N,
-                                                  threat, q)
-    cov = empirical_coverage(z_lo, z_hi, z_true_dep)
-
-    tau_or = policy_oracle(z_true_dep, budget, lam, tau_max)
-    tau_nv = policy_naive(z_naive, budget, lam, tau_max)
-    tau_cb = policy_calibrated(z_cal, budget, lam, tau_max)
-    tau_dr = policy_dro_upper(z_lo, z_hi, budget, lam, tau_max)
-
-    return dict(
-        world=world, cfg=cfg, N=N, threat=threat, n_dep=n_dep,
-        pi_cal=pi_cal, pi_cal_T=pi_cal_T, y_cal=y_cal,
-        z_true_dep=z_true_dep, z_naive=z_naive, z_cal=z_cal,
-        z_lo=z_lo, z_hi=z_hi, q_cf=q, cov=cov,
-        tau_or=tau_or, tau_nv=tau_nv, tau_cb=tau_cb, tau_dr=tau_dr,
-        u_or=utility(tau_or, z_true_dep, lam),
-        u_nv=utility(tau_nv, z_true_dep, lam),
-        u_cb=utility(tau_cb, z_true_dep, lam),
-        u_dr=utility(tau_dr, z_true_dep, lam),
-        T_hat=T_hat,
+    temperature = fit_temperature(fit.pi, fit.y)
+    platt = fit_binary_platt(
+        fit.pi[:, threat_class],
+        (fit.y == threat_class).astype(float),
     )
 
+    evaluation_temperature = apply_temperature(evaluation.pi, temperature)
+    evaluation_threat_raw = evaluation.pi[:, threat_class]
+    evaluation_threat_temperature = evaluation_temperature[:, threat_class]
+    evaluation_threat_platt = apply_binary_platt(evaluation_threat_raw, platt)
+    evaluation_target = (evaluation.y == threat_class).astype(float)
 
-# ---------------------------------------------------------------------------
-def run_single():
-    cfg = WorldConfig(L=20, K=4, seed=1234)
-    out = pipeline(cfg, frac_cal=0.20, alpha=0.10, budget=60.0,
-                   lam=0.25, tau_max=3.0)
-
-    eb = ece(out["pi_cal"], out["y_cal"])
-    ea = ece(out["pi_cal_T"], out["y_cal"])
-    bb = brier(out["pi_cal"], out["y_cal"])
-    ba = brier(out["pi_cal_T"], out["y_cal"])
-
-    r_nv = regret(out["tau_nv"], out["tau_or"], out["z_true_dep"], 0.25)
-    r_cb = regret(out["tau_cb"], out["tau_or"], out["z_true_dep"], 0.25)
-    r_dr = regret(out["tau_dr"], out["tau_or"], out["z_true_dep"], 0.25)
-
-    head = dict(
-        T_true=cfg.T_true, T_hat=out["T_hat"],
-        ece_before=eb, ece_after=ea,
-        brier_before=bb, brier_after=ba,
-        utility_oracle=out["u_or"], utility_naive=out["u_nv"],
-        utility_calibrated=out["u_cb"], utility_dro=out["u_dr"],
-        regret_naive=r_nv, regret_calibrated=r_cb, regret_dro=r_dr,
-        regret_naive_pct=100 * r_nv / out["u_or"],
-        regret_calibrated_pct=100 * r_cb / out["u_or"],
-        regret_dro_pct=100 * r_dr / out["u_or"],
-        pct_regret_closed_calibration=(100 * (r_nv - r_cb) / r_nv if r_nv > 1e-9 else 0.0),
-        pct_regret_closed_dro=(100 * (r_nv - r_dr) / r_nv if r_nv > 1e-9 else 0.0),
-        utility_uplift_calibration_pct=100 * (out["u_cb"] - out["u_nv"]) / out["u_nv"],
-        utility_uplift_dro_pct=100 * (out["u_dr"] - out["u_nv"]) / out["u_nv"],
-        conformal_coverage=out["cov"], nominal_coverage=0.90,
+    interval_threat_platt = apply_binary_platt(
+        interval_calibration.pi[:, threat_class],
+        platt,
     )
-    RESULTS["single"] = {k: float(v) for k, v in head.items()}
-    _make_single_figures(out)
-    return head
+
+    deployment_temperature = apply_temperature(deployment.pi, temperature)
+    deployment_threat_raw = deployment.pi[:, threat_class]
+    deployment_threat_temperature = deployment_temperature[:, threat_class]
+    deployment_threat_platt = apply_binary_platt(deployment_threat_raw, platt)
+
+    z_raw, n_deployment = expected_count_from_probability(
+        deployment_threat_raw,
+        deployment.cell,
+        n_cells,
+    )
+    z_temperature, _ = expected_count_from_probability(
+        deployment_threat_temperature,
+        deployment.cell,
+        n_cells,
+    )
+    _, interval_lower, interval_upper, _ = per_cell_predictive_intervals(
+        interval_threat_platt,
+        interval_calibration.cell,
+        n_cells,
+        alpha=alpha,
+    )
+    interval_realised = realised_count(
+        interval_calibration.y,
+        interval_calibration.cell,
+        n_cells,
+        threat_class,
+    )
+    interval_expansion = calibrate_interval_expansion(
+        interval_lower,
+        interval_upper,
+        interval_realised,
+        alpha=alpha,
+    )
+
+    z_calibrated, z_lower_base, z_upper_base, _ = per_cell_predictive_intervals(
+        deployment_threat_platt,
+        deployment.cell,
+        n_cells,
+        alpha=alpha,
+    )
+    z_lower, z_upper = expand_predictive_intervals(
+        z_lower_base,
+        z_upper_base,
+        n_deployment,
+        interval_expansion,
+    )
+    z_expected = n_deployment * world.p_true[:, threat_class]
+    z_realised = realised_count(
+        deployment.y,
+        deployment.cell,
+        n_cells,
+        threat_class,
+    )
+    base_predictive_coverage = empirical_coverage(
+        z_lower_base,
+        z_upper_base,
+        z_realised,
+    )
+    predictive_coverage = empirical_coverage(z_lower, z_upper, z_realised)
+
+    tau_oracle = policy_oracle(z_expected, budget, lam, tau_max)
+    tau_naive = policy_naive(z_raw, budget, lam, tau_max)
+    tau_temperature = policy_temperature_scaled(
+        z_temperature,
+        budget,
+        lam,
+        tau_max,
+    )
+    tau_calibrated = policy_calibrated(
+        z_calibrated,
+        budget,
+        lam,
+        tau_max,
+    )
+    tau_upper = policy_predictive_upper(
+        z_lower,
+        z_upper,
+        budget,
+        lam,
+        tau_max,
+    )
+
+    utilities = {
+        "oracle": utility(tau_oracle, z_expected, lam),
+        "naive": utility(tau_naive, z_expected, lam),
+        "temperature": utility(tau_temperature, z_expected, lam),
+        "calibrated": utility(tau_calibrated, z_expected, lam),
+        "upper": utility(tau_upper, z_expected, lam),
+    }
+    regrets = {
+        name: regret(tau, tau_oracle, z_expected, lam)
+        for name, tau in {
+            "naive": tau_naive,
+            "temperature": tau_temperature,
+            "calibrated": tau_calibrated,
+            "upper": tau_upper,
+        }.items()
+    }
+
+    metrics = {
+        "top_ece_raw": top_label_ece(evaluation.pi, evaluation.y),
+        "top_ece_temperature": top_label_ece(
+            evaluation_temperature,
+            evaluation.y,
+        ),
+        "multiclass_brier_raw": multiclass_brier(evaluation.pi, evaluation.y),
+        "multiclass_brier_temperature": multiclass_brier(
+            evaluation_temperature,
+            evaluation.y,
+        ),
+        "multiclass_nll_raw": negative_log_likelihood(evaluation.pi, evaluation.y),
+        "multiclass_nll_temperature": negative_log_likelihood(
+            evaluation_temperature,
+            evaluation.y,
+        ),
+        "threat_ece_raw": binary_ece(evaluation_threat_raw, evaluation_target),
+        "threat_ece_temperature": binary_ece(
+            evaluation_threat_temperature,
+            evaluation_target,
+        ),
+        "threat_ece_platt": binary_ece(
+            evaluation_threat_platt,
+            evaluation_target,
+        ),
+        "threat_brier_raw": binary_brier(evaluation_threat_raw, evaluation_target),
+        "threat_brier_temperature": binary_brier(
+            evaluation_threat_temperature,
+            evaluation_target,
+        ),
+        "threat_brier_platt": binary_brier(
+            evaluation_threat_platt,
+            evaluation_target,
+        ),
+    }
+
+    return {
+        "world": world,
+        "cfg": cfg,
+        "fit": fit,
+        "evaluation": evaluation,
+        "interval_calibration": interval_calibration,
+        "deployment": deployment,
+        "temperature": temperature,
+        "platt": platt,
+        "evaluation_temperature": evaluation_temperature,
+        "evaluation_threat_raw": evaluation_threat_raw,
+        "evaluation_threat_temperature": evaluation_threat_temperature,
+        "evaluation_threat_platt": evaluation_threat_platt,
+        "evaluation_target": evaluation_target,
+        "deployment_threat_raw": deployment_threat_raw,
+        "deployment_threat_temperature": deployment_threat_temperature,
+        "interval_threat_platt": interval_threat_platt,
+        "deployment_threat_platt": deployment_threat_platt,
+        "n_deployment": n_deployment,
+        "z_expected": z_expected,
+        "z_realised": z_realised,
+        "z_raw": z_raw,
+        "z_temperature": z_temperature,
+        "z_calibrated": z_calibrated,
+        "z_lower_base": z_lower_base,
+        "z_upper_base": z_upper_base,
+        "z_lower": z_lower,
+        "z_upper": z_upper,
+        "interval_expansion": interval_expansion,
+        "base_predictive_coverage": base_predictive_coverage,
+        "predictive_coverage": predictive_coverage,
+        "tau_oracle": tau_oracle,
+        "tau_naive": tau_naive,
+        "tau_temperature": tau_temperature,
+        "tau_calibrated": tau_calibrated,
+        "tau_upper": tau_upper,
+        "utilities": utilities,
+        "regrets": regrets,
+        "metrics": metrics,
+        "alpha": alpha,
+        "budget": budget,
+        "lam": lam,
+        "tau_max": tau_max,
+        "fit_fraction": fit_fraction,
+    }
 
 
-def _make_single_figures(out):
-    cfg, L = out["cfg"], out["cfg"].L
-    threat = out["threat"]
+def _headline_row(out: dict[str, Any]) -> dict[str, float]:
+    oracle_utility = out["utilities"]["oracle"]
+    naive_regret = out["regrets"]["naive"]
+    result: dict[str, float] = {
+        "seed": float(out["cfg"].seed),
+        "T_true": float(out["cfg"].T_true),
+        "T_hat": float(out["temperature"]),
+        "platt_slope": float(out["platt"].slope),
+        "platt_intercept": float(out["platt"].intercept),
+        "fit_images": float(len(out["fit"].y)),
+        "evaluation_images": float(len(out["evaluation"].y)),
+        "interval_calibration_images": float(len(out["interval_calibration"].y)),
+        "deployment_images": float(len(out["deployment"].y)),
+        "interval_expansion": float(out["interval_expansion"]),
+        "base_predictive_coverage": float(out["base_predictive_coverage"]),
+        "predictive_coverage": float(out["predictive_coverage"]),
+        "nominal_predictive_coverage": float(1.0 - out["alpha"]),
+    }
+    result.update({key: float(value) for key, value in out["metrics"].items()})
+    for policy, value in out["utilities"].items():
+        result[f"utility_{policy}"] = float(value)
+    for policy, value in out["regrets"].items():
+        result[f"regret_{policy}"] = float(value)
+        result[f"regret_{policy}_pct"] = float(100.0 * value / oracle_utility)
+    for policy in ("temperature", "calibrated", "upper"):
+        closed = 0.0 if naive_regret <= 1e-12 else 100.0 * (
+            naive_regret - out["regrets"][policy]
+        ) / naive_regret
+        result[f"pct_naive_regret_closed_{policy}"] = float(closed)
+    return result
+
+
+def _mean_sd(rows: list[dict[str, float]], keys: list[str]) -> dict[str, dict[str, float]]:
+    return {
+        key: {
+            "mean": float(np.mean([row[key] for row in rows])),
+            "sd": float(np.std([row[key] for row in rows], ddof=1)) if len(rows) > 1 else 0.0,
+        }
+        for key in keys
+    }
+
+
+def run_single(*, make_figures: bool = True) -> tuple[dict[str, Any], dict[str, float]]:
+    out = pipeline(WorldConfig(seed=1234))
+    row = _headline_row(out)
+    if make_figures:
+        make_single_figures(out)
+    return out, row
+
+
+def make_single_figures(out: dict[str, Any]) -> None:
+    """Create compact journal-style figures in PNG, PDF, and SVG formats."""
     world = out["world"]
+    cfg = out["cfg"]
+    L = cfg.L
+    threat = world.threat_class
 
-    # World
-    fig, axes = plt.subplots(1, 3, figsize=(10.5, 3.0))
-    im0 = axes[0].imshow(world.p_true[:, threat].reshape(L, L),
-                         cmap="magma", origin="lower")
-    axes[0].set_title(r"True $P(\mathrm{threat})$ per cell")
-    plt.colorbar(im0, ax=axes[0], fraction=0.046)
-    im1 = axes[1].imshow(world.M.reshape(L, L), cmap="viridis", origin="lower")
-    axes[1].set_title(f"Camera-trap images per cell  ($\\mu={cfg.mu_images:.0f}$)")
-    plt.colorbar(im1, ax=axes[1], fraction=0.046)
-    im2 = axes[2].imshow(out["z_true_dep"].reshape(L, L),
-                         cmap="inferno", origin="lower")
-    axes[2].set_title(r"True expected threat count $z_i^{\star}$")
-    plt.colorbar(im2, ax=axes[2], fraction=0.046)
-    for ax in axes: ax.set_xticks([]); ax.set_yticks([])
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "fig_world.png"); plt.close(fig)
+    # ------------------------------------------------------------------
+    # Synthetic world: three compact raster panels with restrained labels.
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(1, 3, figsize=(DOUBLE_COLUMN, 2.22))
+    panels = [
+        (
+            world.p_true[:, threat].reshape(L, L),
+            "magma",
+            "Latent risk probability",
+            "Probability",
+            0.0,
+            1.0,
+        ),
+        (
+            out["n_deployment"].reshape(L, L),
+            "cividis",
+            "Deployment image density",
+            "Images per cell",
+            None,
+            None,
+        ),
+        (
+            out["z_expected"].reshape(L, L),
+            "magma",
+            "Expected risk count",
+            "Expected count",
+            0.0,
+            None,
+        ),
+    ]
+    for index, (axis, panel) in enumerate(zip(axes, panels)):
+        data, cmap, title, cbar_label, vmin, vmax = panel
+        image = axis.imshow(
+            data,
+            cmap=cmap,
+            origin="lower",
+            interpolation="nearest",
+            vmin=vmin,
+            vmax=vmax,
+        )
+        axis.set_title(title, loc="left", pad=3)
+        axis.set_xticks([])
+        axis.set_yticks([])
+        for spine in axis.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(0.45)
+            spine.set_color(COLORS["light_grey"])
+        panel_label(axis, chr(ord("a") + index), x=-0.08, y=1.09)
+        cbar = fig.colorbar(image, ax=axis, fraction=0.046, pad=0.025)
+        cbar.ax.tick_params(length=2, width=0.5)
+        cbar.outline.set_linewidth(0.45)
+        cbar.set_label(cbar_label, labelpad=2)
+    fig.subplots_adjust(left=0.035, right=0.985, bottom=0.06, top=0.88, wspace=0.28)
+    save_figure(fig, FIGDIR, "fig_world")
+    plt.close(fig)
 
-    # Reliability
-    fig, axes = plt.subplots(1, 2, figsize=(7.5, 3.4), sharey=True)
-    eb = ece(out["pi_cal"], out["y_cal"])
-    ea = ece(out["pi_cal_T"], out["y_cal"])
-    for ax, pi_set, title in [
-        (axes[0], out["pi_cal"],   f"Uncalibrated (ECE = {eb:.3f})"),
-        (axes[1], out["pi_cal_T"], f"Temperature-scaled, $\\hat T={out['T_hat']:.2f}$ (ECE = {ea:.3f})"),
-    ]:
-        c, mc, ma, cnt = reliability_curve(pi_set, out["y_cal"], n_bins=12)
-        widths = 1.0 / 12.0
-        ax.bar(c, ma, width=widths * 0.9, color="#4C72B0", alpha=0.45,
-               label="Accuracy")
-        ax.plot(c, mc, "o-", color="#C44E52", lw=1.4, ms=4.5,
-                label="Mean confidence")
-        ax.plot([0, 1], [0, 1], ls="--", lw=0.8, color="gray")
-        ax.set_xlim(0, 1); ax.set_ylim(0, 1)
-        ax.set_xlabel("Confidence")
-        ax.set_title(title)
-        ax.legend(loc="upper left", fontsize=8, frameon=False)
-    axes[0].set_ylabel("Accuracy")
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "fig_reliability.png"); plt.close(fig)
+    # ------------------------------------------------------------------
+    # Reliability: standard accuracy-versus-confidence geometry.
+    # Marker area is proportional to the number of observations in each bin.
+    # ------------------------------------------------------------------
+    evaluation = out["evaluation"]
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(DOUBLE_COLUMN, 2.42),
+        sharex=True,
+        sharey=True,
+    )
+    top_panels = [
+        (
+            axes[0],
+            evaluation.pi,
+            "Raw top-label",
+            out["metrics"]["top_ece_raw"],
+            COLORS["vermillion"],
+        ),
+        (
+            axes[1],
+            out["evaluation_temperature"],
+            "Temperature-scaled",
+            out["metrics"]["top_ece_temperature"],
+            COLORS["blue"],
+        ),
+    ]
+    for index, (axis, pi, title, ece, color) in enumerate(top_panels):
+        _, mean_probability, event_rate, counts = top_label_reliability_curve(
+            pi,
+            evaluation.y,
+            n_bins=10,
+        )
+        valid = counts > 0
+        marker_size = 8.0 + 42.0 * counts[valid] / max(counts[valid].max(), 1)
+        axis.plot([0, 1], [0, 1], color=COLORS["grey"], ls="--", lw=0.75, zorder=0)
+        axis.plot(
+            mean_probability[valid],
+            event_rate[valid],
+            color=color,
+            lw=1.05,
+            zorder=2,
+        )
+        axis.scatter(
+            mean_probability[valid],
+            event_rate[valid],
+            s=marker_size,
+            facecolor=color,
+            edgecolor="white",
+            linewidth=0.45,
+            zorder=3,
+        )
+        axis.set_title(title, loc="left", pad=3)
+        axis.text(
+            0.04,
+            0.94,
+            f"ECE = {ece:.3f}",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=7.0,
+        )
+        panel_label(axis, chr(ord("a") + index))
+        clean_axis(axis)
 
-    # Per-cell estimates + coverage
-    z_true = out["z_true_dep"]
-    z_max = max(z_true.max(), out["z_naive"].max(), out["z_cal"].max())
-    fig, axes = plt.subplots(1, 3, figsize=(11, 3.4))
-    for ax, zh, lab, col in [
-        (axes[0], out["z_naive"], "Naive (uncalibrated)", "#C44E52"),
-        (axes[1], out["z_cal"],   "Calibrated", "#4C72B0"),
-    ]:
-        ax.scatter(z_true, zh, s=12, alpha=0.55, color=col, edgecolor="none")
-        ax.plot([0, z_max], [0, z_max], "k--", lw=0.7)
-        slope = (z_true @ zh) / (z_true @ z_true + 1e-12)
-        ax.set_title(f"{lab} (slope vs truth = {slope:.2f})")
-        ax.set_xlabel(r"True $z_i$ on deployment")
-        ax.set_xlim(0, z_max); ax.set_ylim(0, z_max)
-    ax = axes[2]
+    axis = axes[2]
+    threat_curves = [
+        (
+            out["evaluation_threat_raw"],
+            "Raw",
+            COLORS["vermillion"],
+            "o",
+            out["metrics"]["threat_ece_raw"],
+        ),
+        (
+            out["evaluation_threat_temperature"],
+            "Temperature",
+            COLORS["blue"],
+            "s",
+            out["metrics"]["threat_ece_temperature"],
+        ),
+        (
+            out["evaluation_threat_platt"],
+            "Task-calibrated",
+            COLORS["teal"],
+            "^",
+            out["metrics"]["threat_ece_platt"],
+        ),
+    ]
+    axis.plot([0, 1], [0, 1], color=COLORS["grey"], ls="--", lw=0.75, zorder=0)
+    for probability, label, color, marker, ece in threat_curves:
+        _, mean_probability, event_rate, counts = binary_reliability_curve(
+            probability,
+            out["evaluation_target"],
+            n_bins=10,
+        )
+        valid = counts > 0
+        axis.plot(
+            mean_probability[valid],
+            event_rate[valid],
+            color=color,
+            marker=marker,
+            markerfacecolor="white",
+            markeredgewidth=0.75,
+            lw=1.05,
+            ms=3.6,
+            label=f"{label} ({ece:.3f})",
+        )
+    axis.set_title("Risk-proxy class", loc="left", pad=3)
+    panel_label(axis, "c")
+    axis.text(
+        0.04,
+        0.96,
+        "ECE",
+        transform=axis.transAxes,
+        ha="left",
+        va="top",
+        fontsize=6.5,
+        color=COLORS["grey"],
+    )
+    for line_index, (_, label, color, _, ece) in enumerate(threat_curves):
+        axis.text(
+            0.04,
+            0.86 - 0.095 * line_index,
+            f"{label}: {ece:.3f}",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=6.5,
+            color=color,
+        )
+    clean_axis(axis)
+
+    for axis in axes:
+        axis.set_xlim(0, 1)
+        axis.set_ylim(0, 1)
+        axis.set_xticks([0, 0.5, 1.0])
+        axis.set_yticks([0, 0.5, 1.0])
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_xlabel("Mean predicted probability")
+    axes[0].set_ylabel("Observed event rate")
+    fig.subplots_adjust(left=0.072, right=0.995, bottom=0.21, top=0.88, wspace=0.22)
+    save_figure(fig, FIGDIR, "fig_reliability")
+    plt.close(fig)
+
+    # ------------------------------------------------------------------
+    # Per-cell estimates and predictive intervals.
+    # ------------------------------------------------------------------
+    z_true = out["z_expected"]
+    z_max = max(
+        z_true.max(),
+        out["z_raw"].max(),
+        out["z_temperature"].max(),
+        out["z_calibrated"].max(),
+    )
+    z_limit = float(np.ceil(z_max / 5.0) * 5.0)
+    fig, axes = plt.subplots(1, 4, figsize=(DOUBLE_COLUMN, 2.18))
+    estimate_panels = [
+        (out["z_raw"], "Raw", COLORS["vermillion"]),
+        (out["z_temperature"], "Temperature", COLORS["blue"]),
+        (out["z_calibrated"], "Task-calibrated", COLORS["teal"]),
+    ]
+    for index, (axis, (estimate, label, color)) in enumerate(zip(axes[:3], estimate_panels)):
+        axis.scatter(
+            z_true,
+            estimate,
+            s=7.5,
+            alpha=0.42,
+            color=color,
+            edgecolor="none",
+            rasterized=True,
+        )
+        axis.plot([0, z_limit], [0, z_limit], color=COLORS["grey"], ls="--", lw=0.7)
+        slope = float((z_true @ estimate) / (z_true @ z_true + 1e-12))
+        axis.set_title(label, loc="left", pad=3)
+        axis.text(
+            0.05,
+            0.92,
+            f"Slope = {slope:.2f}",
+            transform=axis.transAxes,
+            ha="left",
+            va="top",
+            fontsize=6.8,
+        )
+        axis.set_xlim(0, z_limit)
+        axis.set_ylim(0, z_limit)
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_xlabel("Expected count")
+        panel_label(axis, chr(ord("a") + index))
+        clean_axis(axis)
+
     order = np.argsort(z_true)
-    xs = np.arange(len(order))
-    ax.fill_between(xs, out["z_lo"][order], out["z_hi"][order],
-                    color="#55A868", alpha=0.30,
-                    label=f"90% conformal (coverage = {out['cov']:.2f})")
-    ax.plot(xs, z_true[order], "k.", ms=2, label="Truth")
-    ax.set_xlabel("Cells sorted by true $z_i$")
-    ax.set_title("Conformal interval coverage")
-    ax.legend(frameon=False, fontsize=8, loc="upper left")
-    axes[0].set_ylabel(r"Estimated $\hat z_i$")
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "fig_per_cell_estimates.png"); plt.close(fig)
+    x = np.arange(len(order))
+    axis = axes[3]
+    axis.fill_between(
+        x,
+        out["z_lower"][order],
+        out["z_upper"][order],
+        color=COLORS["sky"],
+        alpha=0.24,
+        linewidth=0,
+        label=f"{100 * (1 - out['alpha']):.0f}% interval",
+    )
+    axis.plot(
+        x,
+        z_true[order],
+        color=COLORS["blue"],
+        lw=1.0,
+        label="Expected count",
+    )
+    axis.scatter(
+        x,
+        out["z_realised"][order],
+        s=3.0,
+        color=COLORS["ink"],
+        alpha=0.60,
+        edgecolor="none",
+        rasterized=True,
+        label="Realised count",
+    )
+    axis.set_title("Predictive interval", loc="left", pad=3)
+    axis.text(
+        0.04,
+        0.94,
+        f"Coverage = {out['predictive_coverage']:.3f}",
+        transform=axis.transAxes,
+        ha="left",
+        va="top",
+        fontsize=6.8,
+    )
+    axis.set_xlabel("Cells ordered by expected count")
+    panel_label(axis, "d")
+    clean_axis(axis)
+    compact_legend(axis, loc="upper left", bbox_to_anchor=(0.0, 0.82))
+    axes[0].set_ylabel("Estimated count")
+    fig.subplots_adjust(left=0.062, right=0.995, bottom=0.22, top=0.86, wspace=0.30)
+    save_figure(fig, FIGDIR, "fig_per_cell_estimates")
+    plt.close(fig)
 
-    # Allocations
-    fig, axes = plt.subplots(1, 4, figsize=(11.0, 3.0))
-    vmax = max(out["tau_or"].max(), out["tau_nv"].max(),
-               out["tau_cb"].max(), out["tau_dr"].max())
-    for ax, tau, lab in [
-        (axes[0], out["tau_or"], "Oracle"),
-        (axes[1], out["tau_nv"], "Naive"),
-        (axes[2], out["tau_cb"], "Calibrated"),
-        (axes[3], out["tau_dr"], "DRO (conformal upper)"),
-    ]:
-        im = ax.imshow(tau.reshape(L, L), cmap="Reds", origin="lower",
-                       vmin=0, vmax=vmax)
-        ax.set_title(lab); ax.set_xticks([]); ax.set_yticks([])
-    fig.colorbar(im, ax=axes, fraction=0.022,
-                 label=r"Rangers per cell $\tau_i$")
-    fig.savefig(FIGDIR / "fig_allocations.png", bbox_inches="tight")
+    # ------------------------------------------------------------------
+    # Allocation maps: compact 2 x 3 layout with a dedicated colour bar.
+    # ------------------------------------------------------------------
+    fig, axes = plt.subplots(2, 3, figsize=(DOUBLE_COLUMN, 3.55))
+    flat_axes = axes.ravel()
+    allocations = [
+        (out["tau_oracle"], "Oracle"),
+        (out["tau_naive"], "Naive"),
+        (out["tau_temperature"], "Temperature"),
+        (out["tau_calibrated"], "Task-calibrated"),
+        (out["tau_upper"], "Predictive upper"),
+    ]
+    maximum = max(allocation.max() for allocation, _ in allocations)
+    image = None
+    for index, (axis, (allocation, title)) in enumerate(zip(flat_axes[:5], allocations)):
+        image = axis.imshow(
+            allocation.reshape(L, L),
+            cmap=PATROL_CMAP,
+            origin="lower",
+            interpolation="nearest",
+            vmin=0,
+            vmax=maximum,
+        )
+        axis.set_title(title, loc="left", pad=2)
+        axis.set_xticks([])
+        axis.set_yticks([])
+        for spine in axis.spines.values():
+            spine.set_visible(True)
+            spine.set_linewidth(0.40)
+            spine.set_color(COLORS["light_grey"])
+        panel_label(axis, chr(ord("a") + index), x=-0.10, y=1.10)
+
+    cbar_axis = flat_axes[5]
+    cbar_axis.set_axis_off()
+    assert image is not None
+    inset = cbar_axis.inset_axes([0.36, 0.16, 0.16, 0.68])
+    cbar = fig.colorbar(image, cax=inset)
+    cbar.set_label("Patrol hours per cell", labelpad=3)
+    cbar.ax.tick_params(length=2, width=0.5)
+    cbar.outline.set_linewidth(0.45)
+    fig.subplots_adjust(left=0.035, right=0.995, bottom=0.04, top=0.91, wspace=0.16, hspace=0.25)
+    save_figure(fig, FIGDIR, "fig_allocations")
     plt.close(fig)
 
 
-# ---------------------------------------------------------------------------
-def run_sweep_temperature():
-    T_grid = [0.30, 0.40, 0.50, 0.70, 0.90, 1.00, 1.20, 1.60, 2.00, 2.50]
-    rows = []
-    for T_true in T_grid:
-        u_or_l, u_nv_l, u_cb_l, u_dr_l, cov_l = [], [], [], [], []
-        for seed in range(4):
-            cfg = WorldConfig(L=20, K=4, T_true=T_true, seed=20 * seed + 7)
-            out = pipeline(cfg, frac_cal=0.20, alpha=0.10, budget=60.0,
-                           lam=0.25, tau_max=3.0, cal_seed=seed)
-            u_or_l.append(out["u_or"]); u_nv_l.append(out["u_nv"])
-            u_cb_l.append(out["u_cb"]); u_dr_l.append(out["u_dr"])
-            cov_l.append(out["cov"])
-        rows.append(dict(T_true=T_true,
-            u_or=float(np.mean(u_or_l)), u_nv=float(np.mean(u_nv_l)),
-            u_cb=float(np.mean(u_cb_l)), u_dr=float(np.mean(u_dr_l)),
-            coverage=float(np.mean(cov_l))))
-
-    Ts = np.array([r["T_true"] for r in rows])
-    u_or = np.array([r["u_or"] for r in rows])
-    u_nv = np.array([r["u_nv"] for r in rows])
-    u_cb = np.array([r["u_cb"] for r in rows])
-    u_dr = np.array([r["u_dr"] for r in rows])
-
-    fig, ax = plt.subplots(figsize=(5.2, 3.4))
-    ax.plot(Ts, 100 * (u_or - u_nv) / u_or, "o-", color="#C44E52",
-            label="Naive (uncalibrated)")
-    ax.plot(Ts, 100 * (u_or - u_cb) / u_or, "s-", color="#4C72B0",
-            label="Calibrated point estimate")
-    ax.plot(Ts, 100 * (u_or - u_dr) / u_or, "^-", color="#55A868",
-            label="DRO (conformal upper)")
-    ax.axvline(1.0, ls="--", color="gray", lw=0.7)
-    ax.set_xlabel(r"True inverse temperature $T_{\mathrm{true}}$  ($<1$: over-conf., $>1$: under-conf.)")
-    ax.set_ylabel("Regret vs oracle (% of oracle utility)")
-    ax.set_title("Decision-stage cost of miscalibration")
-    ax.legend(frameon=False, fontsize=8)
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "fig_regret_vs_T.png"); plt.close(fig)
-    RESULTS["sweep_T"] = rows
+def run_multiseed(n_seeds: int) -> tuple[list[dict[str, float]], dict[str, dict[str, float]]]:
+    rows = [
+        _headline_row(pipeline(WorldConfig(seed=1000 + seed)))
+        for seed in range(n_seeds)
+    ]
+    keys = [
+        "top_ece_raw",
+        "top_ece_temperature",
+        "threat_ece_raw",
+        "threat_ece_temperature",
+        "threat_ece_platt",
+        "regret_naive_pct",
+        "regret_temperature_pct",
+        "regret_calibrated_pct",
+        "regret_upper_pct",
+        "pct_naive_regret_closed_temperature",
+        "pct_naive_regret_closed_calibrated",
+        "base_predictive_coverage",
+        "predictive_coverage",
+        "interval_expansion",
+    ]
+    return rows, _mean_sd(rows, keys)
 
 
-def run_sweep_calsize():
-    fracs = [0.05, 0.10, 0.15, 0.20, 0.30, 0.40, 0.60]
-    rows = []
-    for frac in fracs:
-        u_or_l, u_nv_l, u_cb_l, u_dr_l, cov_l = [], [], [], [], []
-        for seed in range(5):
-            cfg = WorldConfig(L=20, K=4, seed=20 * seed + 11)
-            out = pipeline(cfg, frac_cal=frac, alpha=0.10, budget=60.0,
-                           lam=0.25, tau_max=3.0, cal_seed=seed)
-            u_or_l.append(out["u_or"]); u_nv_l.append(out["u_nv"])
-            u_cb_l.append(out["u_cb"]); u_dr_l.append(out["u_dr"])
-            cov_l.append(out["cov"])
-        rows.append(dict(frac=frac,
-            u_or=float(np.mean(u_or_l)), u_nv=float(np.mean(u_nv_l)),
-            u_cb=float(np.mean(u_cb_l)), u_dr=float(np.mean(u_dr_l)),
-            coverage=float(np.mean(cov_l)),
-            u_cb_std=float(np.std(u_cb_l)),
-            u_dr_std=float(np.std(u_dr_l))))
+def run_temperature_sweep(n_seeds: int) -> list[dict[str, float]]:
+    temperatures = [0.30, 0.40, 0.50, 0.70, 0.90, 1.00, 1.20, 1.60, 2.00, 2.50]
+    rows: list[dict[str, float]] = []
+    for temperature in temperatures:
+        seed_rows = []
+        for seed in range(n_seeds):
+            out = pipeline(
+                WorldConfig(T_true=temperature, seed=2000 + seed),
+                fit_subsample_seed=seed,
+            )
+            row = _headline_row(out)
+            seed_rows.append(row)
+        summary = {"T_true": float(temperature)}
+        for key in (
+            "regret_naive_pct",
+            "regret_temperature_pct",
+            "regret_calibrated_pct",
+            "regret_upper_pct",
+            "predictive_coverage",
+        ):
+            summary[f"{key}_mean"] = float(np.mean([row[key] for row in seed_rows]))
+            summary[f"{key}_sd"] = float(np.std([row[key] for row in seed_rows], ddof=1))
+        rows.append(summary)
 
-    xs = np.array([r["frac"] for r in rows])
-    u_or = np.array([r["u_or"] for r in rows])
-    u_nv = np.array([r["u_nv"] for r in rows])
-    u_cb = np.array([r["u_cb"] for r in rows])
-    u_dr = np.array([r["u_dr"] for r in rows])
+    x = np.array([row["T_true"] for row in rows])
+    fig, axis = plt.subplots(figsize=(SINGLE_COLUMN, 2.55))
+    series = [
+        ("regret_naive_pct", "Naive", "o", COLORS["vermillion"]),
+        ("regret_temperature_pct", "Temperature", "s", COLORS["blue"]),
+        ("regret_calibrated_pct", "Task-calibrated", "^", COLORS["teal"]),
+        ("regret_upper_pct", "Predictive upper", "D", COLORS["gold"]),
+    ]
+    for base_key, label, marker, color in series:
+        mean = np.array([row[f"{base_key}_mean"] for row in rows])
+        sd = np.array([row[f"{base_key}_sd"] for row in rows])
+        shade_uncertainty(axis, x, mean, sd, color=color)
+        axis.plot(
+            x,
+            mean,
+            color=color,
+            marker=marker,
+            markerfacecolor="white",
+            markeredgewidth=0.75,
+            label=label,
+            zorder=3,
+        )
+    axis.axvline(1.0, color=COLORS["grey"], ls="--", lw=0.75, zorder=0)
+    axis.text(
+        1.02,
+        0.97,
+        "Calibrated reference",
+        transform=axis.get_xaxis_transform(),
+        ha="left",
+        va="top",
+        fontsize=6.2,
+        color=COLORS["grey"],
+    )
+    axis.set_xlabel(r"Synthetic classifier temperature $T_{\mathrm{true}}$")
+    axis.set_ylabel("Regret (% of oracle utility)")
+    axis.set_xlim(x.min(), x.max())
+    axis.set_ylim(bottom=0)
+    clean_axis(axis)
+    compact_legend(axis, loc="upper right", ncol=1)
+    fig.subplots_adjust(left=0.19, right=0.98, bottom=0.22, top=0.97)
+    save_figure(fig, FIGDIR, "fig_regret_vs_T")
+    plt.close(fig)
+    return rows
 
-    fig, ax = plt.subplots(figsize=(5.2, 3.4))
-    ax.plot(xs, 100 * (u_or - u_nv) / u_or, "o-", color="#C44E52", label="Naive")
-    ax.plot(xs, 100 * (u_or - u_cb) / u_or, "s-", color="#4C72B0", label="Calibrated")
-    ax.plot(xs, 100 * (u_or - u_dr) / u_or, "^-", color="#55A868", label="DRO")
-    ax.set_xlabel("Fraction of images held out for calibration")
-    ax.set_ylabel("Regret vs oracle (% of oracle utility)")
-    ax.set_title("Regret as calibration sample size varies")
-    ax.legend(frameon=False, fontsize=8)
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "fig_regret_vs_calsize.png"); plt.close(fig)
 
-    fig, ax = plt.subplots(figsize=(5.0, 3.0))
-    ax.plot(xs, [r["coverage"] for r in rows], "o-", color="#55A868")
-    ax.axhline(0.90, ls="--", color="gray", lw=0.8, label="Nominal 90%")
-    ax.set_xlabel("Calibration set fraction")
-    ax.set_ylabel("Empirical interval coverage")
-    ax.set_title("Conformal interval validity")
-    ax.set_ylim(0.7, 1.02); ax.legend(frameon=False)
-    fig.tight_layout()
-    fig.savefig(FIGDIR / "fig_coverage.png"); plt.close(fig)
+def run_fit_size_sweep(n_seeds: int) -> list[dict[str, float]]:
+    fractions = [0.05, 0.10, 0.20, 0.30, 0.50, 0.75, 1.00]
+    by_fraction: dict[float, list[dict[str, float]]] = {fraction: [] for fraction in fractions}
+    for seed in range(n_seeds):
+        # The same world, evaluation batch, and deployment batch are reused for
+        # every fit fraction.  Only the fixed temperature-fit pool is subsampled.
+        world = make_world(WorldConfig(seed=3000 + seed))
+        for fraction in fractions:
+            out = pipeline(
+                world=world,
+                fit_fraction=fraction,
+                fit_subsample_seed=17 + seed,
+            )
+            by_fraction[fraction].append(_headline_row(out))
 
-    RESULTS["sweep_calsize"] = rows
+    rows: list[dict[str, float]] = []
+    for fraction in fractions:
+        seed_rows = by_fraction[fraction]
+        row = {
+            "fit_fraction": float(fraction),
+            "fit_images_mean": float(np.mean([item["fit_images"] for item in seed_rows])),
+        }
+        for key in (
+            "regret_naive_pct",
+            "regret_temperature_pct",
+            "regret_calibrated_pct",
+            "regret_upper_pct",
+            "threat_ece_platt",
+            "predictive_coverage",
+        ):
+            row[f"{key}_mean"] = float(np.mean([item[key] for item in seed_rows]))
+            row[f"{key}_sd"] = float(np.std([item[key] for item in seed_rows], ddof=1))
+        rows.append(row)
+
+    x = np.array([row["fit_images_mean"] for row in rows])
+    fig, axis = plt.subplots(figsize=(SINGLE_COLUMN, 2.55))
+    series = [
+        ("regret_naive_pct", "Naive", "o", COLORS["vermillion"]),
+        ("regret_temperature_pct", "Temperature", "s", COLORS["blue"]),
+        ("regret_calibrated_pct", "Task-calibrated", "^", COLORS["teal"]),
+        ("regret_upper_pct", "Predictive upper", "D", COLORS["gold"]),
+    ]
+    for base_key, label, marker, color in series:
+        mean = np.array([row[f"{base_key}_mean"] for row in rows])
+        sd = np.array([row[f"{base_key}_sd"] for row in rows])
+        shade_uncertainty(axis, x, mean, sd, color=color)
+        axis.plot(
+            x,
+            mean,
+            color=color,
+            marker=marker,
+            markerfacecolor="white",
+            markeredgewidth=0.75,
+            label=label,
+            zorder=3,
+        )
+    axis.set_xlabel("Labelled images used to fit calibrators")
+    axis.set_ylabel("Regret (% of oracle utility)")
+    axis.set_xlim(x.min(), x.max())
+    axis.set_ylim(bottom=0)
+    clean_axis(axis)
+    compact_legend(axis, loc="upper right")
+    fig.subplots_adjust(left=0.19, right=0.98, bottom=0.22, top=0.97)
+    save_figure(fig, FIGDIR, "fig_regret_vs_calsize")
+    plt.close(fig)
+
+    fig, axis = plt.subplots(figsize=(SINGLE_COLUMN, 2.35))
+    coverage_mean = np.array([row["predictive_coverage_mean"] for row in rows])
+    coverage_sd = np.array([row["predictive_coverage_sd"] for row in rows])
+    shade_uncertainty(axis, x, coverage_mean, coverage_sd, color=COLORS["blue"])
+    axis.plot(
+        x,
+        coverage_mean,
+        color=COLORS["blue"],
+        marker="o",
+        markerfacecolor="white",
+        markeredgewidth=0.75,
+        label="Empirical coverage",
+    )
+    axis.axhline(
+        0.90,
+        color=COLORS["grey"],
+        ls="--",
+        lw=0.75,
+        label="Nominal 90%",
+    )
+    axis.set_xlabel("Labelled images used to fit calibrators")
+    axis.set_ylabel("Realised-count coverage")
+    axis.set_xlim(x.min(), x.max())
+    axis.set_ylim(0.78, 1.005)
+    clean_axis(axis)
+    compact_legend(axis, loc="lower right")
+    fig.subplots_adjust(left=0.19, right=0.98, bottom=0.24, top=0.97)
+    save_figure(fig, FIGDIR, "fig_coverage")
+    plt.close(fig)
+    return rows
+
+
+def run_asymmetric_cost_experiment(n_seeds: int) -> list[dict[str, float]]:
+    """Evaluate nominal and interval-stress operational loss.
+
+    For each missed-event cost, the point policy plans with the calibrated mean
+    count and the interval-robust policy plans with the predictive upper count.
+    Excess loss is measured relative to the field-specific oracle.  The upper
+    policy is consequently optimal for the upper-bound stress field, while its
+    nominal excess loss quantifies the price (or benefit) of robustness.
+    """
+    miss_costs = [0.10, 0.20, 0.50, 1.0, 2.0, 5.0, 10.0]
+    raw_rows: dict[float, list[dict[str, float]]] = {
+        miss_cost: [] for miss_cost in miss_costs
+    }
+
+    for seed in range(n_seeds):
+        out = pipeline(WorldConfig(seed=4000 + seed))
+        L = out["cfg"].L
+        coordinates = np.indices((L, L)).reshape(2, -1).T
+        centre = np.array([(L - 1) / 2.0, (L - 1) / 2.0])
+        distance = np.linalg.norm(coordinates - centre, axis=1)
+        patrol_cost = 0.8 + 0.4 * distance / distance.max()
+
+        for miss_cost in miss_costs:
+            common = dict(
+                max_budget=out["budget"],
+                lam=out["lam"],
+                tau_max=out["tau_max"],
+                miss_cost=miss_cost,
+                patrol_cost=patrol_cost,
+            )
+            point_allocation = cost_sensitive_allocate(out["z_calibrated"], **common)
+            upper_allocation = cost_sensitive_allocate(out["z_upper"], **common)
+            nominal_oracle = cost_sensitive_allocate(out["z_expected"], **common)
+            stress_oracle = cost_sensitive_allocate(out["z_upper"], **common)
+
+            def loss(allocation: np.ndarray, field: np.ndarray) -> float:
+                return operational_loss(
+                    allocation,
+                    field,
+                    lam=out["lam"],
+                    miss_cost=miss_cost,
+                    patrol_cost=patrol_cost,
+                )
+
+            nominal_optimum = loss(nominal_oracle, out["z_expected"])
+            stress_optimum = loss(stress_oracle, out["z_upper"])
+            nominal_point_excess = loss(point_allocation, out["z_expected"]) - nominal_optimum
+            nominal_upper_excess = loss(upper_allocation, out["z_expected"]) - nominal_optimum
+            stress_point_excess = loss(point_allocation, out["z_upper"]) - stress_optimum
+            stress_upper_excess = loss(upper_allocation, out["z_upper"]) - stress_optimum
+
+            raw_rows[miss_cost].append(
+                {
+                    "point_hours": float(point_allocation.sum()),
+                    "upper_hours": float(upper_allocation.sum()),
+                    "nominal_point_excess": float(max(nominal_point_excess, 0.0)),
+                    "nominal_upper_excess": float(max(nominal_upper_excess, 0.0)),
+                    "stress_point_excess": float(max(stress_point_excess, 0.0)),
+                    "stress_upper_excess": float(max(stress_upper_excess, 0.0)),
+                }
+            )
+
+    rows: list[dict[str, float]] = []
+    for miss_cost in miss_costs:
+        seed_rows = raw_rows[miss_cost]
+        row: dict[str, float] = {"miss_cost": float(miss_cost)}
+        for key in seed_rows[0]:
+            values = [item[key] for item in seed_rows]
+            row[f"{key}_mean"] = float(np.mean(values))
+            row[f"{key}_sd"] = float(np.std(values, ddof=1)) if len(values) > 1 else 0.0
+        point_nominal = row["nominal_point_excess_mean"]
+        upper_nominal = row["nominal_upper_excess_mean"]
+        point_stress = row["stress_point_excess_mean"]
+        upper_stress = row["stress_upper_excess_mean"]
+        row["nominal_excess_reduction_pct"] = (
+            0.0 if point_nominal <= 1e-12
+            else 100.0 * (point_nominal - upper_nominal) / point_nominal
+        )
+        row["stress_excess_reduction_pct"] = (
+            0.0 if point_stress <= 1e-12
+            else 100.0 * (point_stress - upper_stress) / point_stress
+        )
+        rows.append(row)
+
+    x = np.array([row["miss_cost"] for row in rows])
+    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COLUMN, 2.42), sharex=True)
+    field_panels = [
+        (
+            axes[0],
+            "nominal_point_excess",
+            "nominal_upper_excess",
+            "Nominal expected field",
+        ),
+        (
+            axes[1],
+            "stress_point_excess",
+            "stress_upper_excess",
+            "Upper-bound stress field",
+        ),
+    ]
+    for index, (axis, point_key, upper_key, title) in enumerate(field_panels):
+        for base_key, label, marker, color in [
+            (point_key, "Task-calibrated point", "o", COLORS["blue"]),
+            (upper_key, "Predictive upper", "s", COLORS["gold"]),
+        ]:
+            mean = np.array([row[f"{base_key}_mean"] for row in rows])
+            sd = np.array([row[f"{base_key}_sd"] for row in rows])
+            shade_uncertainty(axis, x, mean, sd, color=color)
+            axis.plot(
+                x,
+                mean,
+                color=color,
+                marker=marker,
+                markerfacecolor="white",
+                markeredgewidth=0.75,
+                label=label,
+                zorder=3,
+            )
+        axis.set_xscale("log")
+        axis.set_xlim(x.min(), x.max())
+        axis.set_ylim(bottom=0)
+        axis.set_title(title, loc="left", pad=3)
+        axis.set_xlabel("Missed-event / patrol-hour cost")
+        panel_label(axis, chr(ord("a") + index), x=-0.13, y=1.08)
+        clean_axis(axis)
+    axes[0].set_ylabel("Excess operational loss")
+    compact_legend(axes[0], loc="upper left")
+    fig.subplots_adjust(left=0.085, right=0.995, bottom=0.23, top=0.86, wspace=0.26)
+    save_figure(fig, FIGDIR, "fig_asymmetric_cost")
+    plt.close(fig)
+    return rows
+
+def _write_seed_csv(rows: list[dict[str, float]]) -> None:
+    path = ROOT / "results_seed_level.csv"
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--quick",
+        action="store_true",
+        help="use fewer random seeds for a fast validation run",
+    )
+    args = parser.parse_args()
+    multiseed_n = 5 if args.quick else 20
+    sweep_n = 3 if args.quick else 8
+
+    out, single = run_single(make_figures=True)
+    seed_rows, multiseed = run_multiseed(multiseed_n)
+    temperature_sweep = run_temperature_sweep(sweep_n)
+    fit_size_sweep = run_fit_size_sweep(sweep_n)
+    asymmetric_cost = run_asymmetric_cost_experiment(sweep_n)
+
+    results = {
+        "schema_version": 2,
+        "method_notes": {
+            "data_roles": "disjoint temperature-fit, evaluation, and deployment batches",
+            "decision_calibrator": "binary Platt scaling for the human-presence risk proxy",
+            "count_interval": "Poisson-binomial realised-count interval with width calibrated on a separate deployment-sized labelled batch",
+            "upper_policy": "predictive upper-bound / interval-robust; not distributionally robust optimisation",
+        },
+        "single": single,
+        "multiseed_summary": multiseed,
+        "temperature_sweep": temperature_sweep,
+        "fit_size_sweep": fit_size_sweep,
+        "asymmetric_cost": asymmetric_cost,
+    }
+    with (ROOT / "results.json").open("w", encoding="utf-8") as handle:
+        json.dump(results, handle, indent=2)
+    _write_seed_csv(seed_rows)
+
+    print("---- Corrected headline run ----")
+    for key in (
+        "deployment_images",
+        "T_hat",
+        "top_ece_raw",
+        "top_ece_temperature",
+        "threat_ece_raw",
+        "threat_ece_temperature",
+        "threat_ece_platt",
+        "predictive_coverage",
+        "regret_naive_pct",
+        "regret_temperature_pct",
+        "regret_calibrated_pct",
+        "regret_upper_pct",
+        "pct_naive_regret_closed_calibrated",
+    ):
+        print(f"  {key:42s} {single[key]:10.4f}")
+    print(f"\nResults: {ROOT / 'results.json'}")
+    print(f"Seed-level results: {ROOT / 'results_seed_level.csv'}")
+    print(f"Figures: {FIGDIR}")
 
 
 if __name__ == "__main__":
-    head = run_single()
-    print("---- Headline numbers ----")
-    for k, v in head.items():
-        print(f"  {k:38s} {v:9.4f}")
-    print("\n---- Sweep over T_true ----")
-    run_sweep_temperature(); print("done")
-    print("\n---- Sweep over calibration set size ----")
-    run_sweep_calsize(); print("done")
-
-    with open(ROOT / "results.json", "w") as f:
-        json.dump(RESULTS, f, indent=2)
-    print(f"\nFigures saved in {FIGDIR}")
-    print(f"Results JSON saved at {ROOT / 'results.json'}")
+    main()
