@@ -363,7 +363,12 @@ def make_single_figures(out: dict[str, Any]) -> None:
     # ------------------------------------------------------------------
     # Synthetic world: three compact raster panels with restrained labels.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(1, 3, figsize=(DOUBLE_COLUMN, 2.22))
+    fig, axes = plt.subplots(
+        1,
+        3,
+        figsize=(DOUBLE_COLUMN, 2.80),
+        layout="constrained",
+    )
     panels = [
         (
             world.p_true[:, threat].reshape(L, L),
@@ -412,7 +417,6 @@ def make_single_figures(out: dict[str, Any]) -> None:
         cbar.ax.tick_params(length=2, width=0.5)
         cbar.outline.set_linewidth(0.45)
         cbar.set_label(cbar_label, labelpad=2)
-    fig.subplots_adjust(left=0.035, right=0.985, bottom=0.06, top=0.88, wspace=0.28)
     save_figure(fig, FIGDIR, "fig_world")
     plt.close(fig)
 
@@ -424,9 +428,10 @@ def make_single_figures(out: dict[str, Any]) -> None:
     fig, axes = plt.subplots(
         1,
         3,
-        figsize=(DOUBLE_COLUMN, 2.42),
+        figsize=(DOUBLE_COLUMN, 2.95),
         sharex=True,
         sharey=True,
+        layout="constrained",
     )
     top_panels = [
         (
@@ -551,14 +556,15 @@ def make_single_figures(out: dict[str, Any]) -> None:
     clean_axis(axis)
 
     for axis in axes:
-        axis.set_xlim(0, 1)
-        axis.set_ylim(0, 1)
+        # A small data-space margin prevents markers at probabilities 0 or 1
+        # from being clipped by the axes boundary in PNG/PDF/SVG output.
+        axis.set_xlim(-0.02, 1.02)
+        axis.set_ylim(-0.02, 1.02)
         axis.set_xticks([0, 0.5, 1.0])
         axis.set_yticks([0, 0.5, 1.0])
         axis.set_aspect("equal", adjustable="box")
         axis.set_xlabel("Mean predicted probability")
     axes[0].set_ylabel("Observed event rate")
-    fig.subplots_adjust(left=0.072, right=0.995, bottom=0.21, top=0.88, wspace=0.22)
     save_figure(fig, FIGDIR, "fig_reliability")
     plt.close(fig)
 
@@ -573,13 +579,21 @@ def make_single_figures(out: dict[str, Any]) -> None:
         out["z_calibrated"].max(),
     )
     z_limit = float(np.ceil(z_max / 5.0) * 5.0)
-    fig, axes = plt.subplots(1, 4, figsize=(DOUBLE_COLUMN, 2.18))
+    fig, axes = plt.subplots(
+        2,
+        2,
+        figsize=(DOUBLE_COLUMN, 5.25),
+        layout="constrained",
+    )
+    flat_axes = axes.ravel()
     estimate_panels = [
         (out["z_raw"], "Raw", COLORS["vermillion"]),
         (out["z_temperature"], "Temperature", COLORS["blue"]),
         (out["z_calibrated"], "Task-calibrated", COLORS["teal"]),
     ]
-    for index, (axis, (estimate, label, color)) in enumerate(zip(axes[:3], estimate_panels)):
+    for index, (axis, (estimate, label, color)) in enumerate(
+        zip(flat_axes[:3], estimate_panels)
+    ):
         axis.scatter(
             z_true,
             estimate,
@@ -601,8 +615,9 @@ def make_single_figures(out: dict[str, Any]) -> None:
             va="top",
             fontsize=6.8,
         )
-        axis.set_xlim(0, z_limit)
-        axis.set_ylim(0, z_limit)
+        margin = 0.02 * z_limit
+        axis.set_xlim(-margin, z_limit + margin)
+        axis.set_ylim(-margin, z_limit + margin)
         axis.set_aspect("equal", adjustable="box")
         axis.set_xlabel("Expected count")
         panel_label(axis, chr(ord("a") + index))
@@ -610,7 +625,7 @@ def make_single_figures(out: dict[str, Any]) -> None:
 
     order = np.argsort(z_true)
     x = np.arange(len(order))
-    axis = axes[3]
+    axis = flat_axes[3]
     axis.fill_between(
         x,
         out["z_lower"][order],
@@ -647,19 +662,24 @@ def make_single_figures(out: dict[str, Any]) -> None:
         va="top",
         fontsize=6.8,
     )
-    axis.set_xlabel("Cells ordered by expected count")
+    axis.set_xlabel("Cells ranked by expected count")
     panel_label(axis, "d")
     clean_axis(axis)
     compact_legend(axis, loc="upper left", bbox_to_anchor=(0.0, 0.82))
-    axes[0].set_ylabel("Estimated count")
-    fig.subplots_adjust(left=0.062, right=0.995, bottom=0.22, top=0.86, wspace=0.30)
+    axes[0, 0].set_ylabel("Estimated count")
+    axes[1, 0].set_ylabel("Estimated count")
     save_figure(fig, FIGDIR, "fig_per_cell_estimates")
     plt.close(fig)
 
     # ------------------------------------------------------------------
     # Allocation maps: compact 2 x 3 layout with a dedicated colour bar.
     # ------------------------------------------------------------------
-    fig, axes = plt.subplots(2, 3, figsize=(DOUBLE_COLUMN, 3.55))
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(DOUBLE_COLUMN, 4.20),
+        layout="constrained",
+    )
     flat_axes = axes.ravel()
     allocations = [
         (out["tau_oracle"], "Oracle"),
@@ -696,7 +716,6 @@ def make_single_figures(out: dict[str, Any]) -> None:
     cbar.set_label("Patrol hours per cell", labelpad=3)
     cbar.ax.tick_params(length=2, width=0.5)
     cbar.outline.set_linewidth(0.45)
-    fig.subplots_adjust(left=0.035, right=0.995, bottom=0.04, top=0.91, wspace=0.16, hspace=0.25)
     save_figure(fig, FIGDIR, "fig_allocations")
     plt.close(fig)
 
@@ -750,7 +769,10 @@ def run_temperature_sweep(n_seeds: int) -> list[dict[str, float]]:
         rows.append(summary)
 
     x = np.array([row["T_true"] for row in rows])
-    fig, axis = plt.subplots(figsize=(SINGLE_COLUMN, 2.55))
+    fig, axis = plt.subplots(
+        figsize=(SINGLE_COLUMN, 2.90),
+        layout="constrained",
+    )
     series = [
         ("regret_naive_pct", "Naive", "o", COLORS["vermillion"]),
         ("regret_temperature_pct", "Temperature", "s", COLORS["blue"]),
@@ -784,11 +806,11 @@ def run_temperature_sweep(n_seeds: int) -> list[dict[str, float]]:
     )
     axis.set_xlabel(r"Synthetic classifier temperature $T_{\mathrm{true}}$")
     axis.set_ylabel("Regret (% of oracle utility)")
-    axis.set_xlim(x.min(), x.max())
+    x_padding = 0.025 * (x.max() - x.min())
+    axis.set_xlim(x.min() - x_padding, x.max() + x_padding)
     axis.set_ylim(bottom=0)
     clean_axis(axis)
     compact_legend(axis, loc="upper right", ncol=1)
-    fig.subplots_adjust(left=0.19, right=0.98, bottom=0.22, top=0.97)
     save_figure(fig, FIGDIR, "fig_regret_vs_T")
     plt.close(fig)
     return rows
@@ -829,7 +851,10 @@ def run_fit_size_sweep(n_seeds: int) -> list[dict[str, float]]:
         rows.append(row)
 
     x = np.array([row["fit_images_mean"] for row in rows])
-    fig, axis = plt.subplots(figsize=(SINGLE_COLUMN, 2.55))
+    fig, axis = plt.subplots(
+        figsize=(SINGLE_COLUMN, 2.90),
+        layout="constrained",
+    )
     series = [
         ("regret_naive_pct", "Naive", "o", COLORS["vermillion"]),
         ("regret_temperature_pct", "Temperature", "s", COLORS["blue"]),
@@ -852,15 +877,18 @@ def run_fit_size_sweep(n_seeds: int) -> list[dict[str, float]]:
         )
     axis.set_xlabel("Labelled images used to fit calibrators")
     axis.set_ylabel("Regret (% of oracle utility)")
-    axis.set_xlim(x.min(), x.max())
+    x_padding = 0.025 * (x.max() - x.min())
+    axis.set_xlim(x.min() - x_padding, x.max() + x_padding)
     axis.set_ylim(bottom=0)
     clean_axis(axis)
     compact_legend(axis, loc="upper right")
-    fig.subplots_adjust(left=0.19, right=0.98, bottom=0.22, top=0.97)
     save_figure(fig, FIGDIR, "fig_regret_vs_calsize")
     plt.close(fig)
 
-    fig, axis = plt.subplots(figsize=(SINGLE_COLUMN, 2.35))
+    fig, axis = plt.subplots(
+        figsize=(SINGLE_COLUMN, 2.75),
+        layout="constrained",
+    )
     coverage_mean = np.array([row["predictive_coverage_mean"] for row in rows])
     coverage_sd = np.array([row["predictive_coverage_sd"] for row in rows])
     shade_uncertainty(axis, x, coverage_mean, coverage_sd, color=COLORS["blue"])
@@ -882,11 +910,11 @@ def run_fit_size_sweep(n_seeds: int) -> list[dict[str, float]]:
     )
     axis.set_xlabel("Labelled images used to fit calibrators")
     axis.set_ylabel("Realised-count coverage")
-    axis.set_xlim(x.min(), x.max())
+    x_padding = 0.025 * (x.max() - x.min())
+    axis.set_xlim(x.min() - x_padding, x.max() + x_padding)
     axis.set_ylim(0.78, 1.005)
     clean_axis(axis)
     compact_legend(axis, loc="lower right")
-    fig.subplots_adjust(left=0.19, right=0.98, bottom=0.24, top=0.97)
     save_figure(fig, FIGDIR, "fig_coverage")
     plt.close(fig)
     return rows
@@ -977,7 +1005,13 @@ def run_asymmetric_cost_experiment(n_seeds: int) -> list[dict[str, float]]:
         rows.append(row)
 
     x = np.array([row["miss_cost"] for row in rows])
-    fig, axes = plt.subplots(1, 2, figsize=(DOUBLE_COLUMN, 2.42), sharex=True)
+    fig, axes = plt.subplots(
+        1,
+        2,
+        figsize=(DOUBLE_COLUMN, 2.95),
+        sharex=True,
+        layout="constrained",
+    )
     field_panels = [
         (
             axes[0],
@@ -1009,9 +1043,10 @@ def run_asymmetric_cost_experiment(n_seeds: int) -> list[dict[str, float]]:
                 markeredgewidth=0.75,
                 label=label,
                 zorder=3,
+                clip_on=False,
             )
         axis.set_xscale("log")
-        axis.set_xlim(x.min(), x.max())
+        axis.set_xlim(x.min() / 1.08, x.max() * 1.08)
         axis.set_ylim(bottom=0)
         axis.set_title(title, loc="left", pad=3)
         axis.set_xlabel("Missed-event / patrol-hour cost")
@@ -1019,7 +1054,6 @@ def run_asymmetric_cost_experiment(n_seeds: int) -> list[dict[str, float]]:
         clean_axis(axis)
     axes[0].set_ylabel("Excess operational loss")
     compact_legend(axes[0], loc="upper left")
-    fig.subplots_adjust(left=0.085, right=0.995, bottom=0.23, top=0.86, wspace=0.26)
     save_figure(fig, FIGDIR, "fig_asymmetric_cost")
     plt.close(fig)
     return rows

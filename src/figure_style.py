@@ -43,8 +43,8 @@ PATROL_CMAP = LinearSegmentedColormap.from_list(
 )
 
 # Approximate journal widths.
-SINGLE_COLUMN = 3.55
-DOUBLE_COLUMN = 7.20
+SINGLE_COLUMN = 3.70
+DOUBLE_COLUMN = 7.50
 
 
 def apply_editorial_style() -> None:
@@ -52,6 +52,7 @@ def apply_editorial_style() -> None:
     mpl.rcParams.update(
         {
             "figure.dpi": 130,
+            "figure.constrained_layout.use": False,
             "savefig.dpi": 600,
             "savefig.transparent": False,
             "font.family": "sans-serif",
@@ -128,13 +129,20 @@ def compact_legend(axis: plt.Axes, *, ncol: int = 1, **kwargs: object) -> None:
 
 
 def save_figure(fig: plt.Figure, directory: Path, stem: str) -> None:
-    """Save publication outputs in high-resolution raster and vector formats."""
+    """Save publication outputs without clipping labels or panel annotations.
+
+    ``bbox_inches='tight'`` alone can still crop artists that sit very close to
+    the canvas boundary, especially panel labels and long axis labels in SVG or
+    PDF output.  Drawing the canvas first and retaining a slightly larger pad
+    makes all three output formats consistent.
+    """
     directory.mkdir(parents=True, exist_ok=True)
+    fig.canvas.draw()
     for suffix in ("png", "pdf", "svg"):
         fig.savefig(
             directory / f"{stem}.{suffix}",
             bbox_inches="tight",
-            pad_inches=0.025,
+            pad_inches=0.10,
             facecolor="white",
         )
 
