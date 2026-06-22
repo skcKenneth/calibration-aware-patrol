@@ -1,13 +1,9 @@
-"""Run the corrected calibration-aware patrol-allocation experiments.
+"""Run the calibration-aware patrol-allocation experiments.
 
-Key safeguards relative to the first release:
-
-* calibrator fitting, metric evaluation, and deployment use independent data;
-* decision calibration is assessed for the operational risk-proxy class;
-* count intervals are Poisson-binomial predictive intervals for realised counts;
-* the upper policy is named predictive upper-bound, not DRO;
-* calibration-size sweeps keep evaluation and deployment data fixed;
-* an explicit missed-event/patrol-cost experiment evaluates asymmetric costs.
+Uses independent batches for fitting, evaluation, interval calibration, and
+deployment. Reports risk-class calibration, Poisson-binomial count intervals,
+and an upper-bound policy (not DRO). Includes calibration-size sweeps and an
+asymmetric-cost study.
 """
 from __future__ import annotations
 
@@ -87,7 +83,7 @@ def pipeline(
     lam: float = 0.25,
     tau_max: float = 3.0,
 ) -> dict[str, Any]:
-    """Run one end-to-end experiment without reusing labels across roles."""
+    """Run one end-to-end experiment with disjoint data roles."""
     if world is None:
         world = make_world(cfg or WorldConfig())
     cfg = world.cfg
@@ -354,15 +350,13 @@ def run_single(*, make_figures: bool = True) -> tuple[dict[str, Any], dict[str, 
 
 
 def make_single_figures(out: dict[str, Any]) -> None:
-    """Create compact journal-style figures in PNG, PDF, and SVG formats."""
+    """Write the main figure set to FIGDIR."""
     world = out["world"]
     cfg = out["cfg"]
     L = cfg.L
     threat = world.threat_class
 
-    # ------------------------------------------------------------------
-    # Synthetic world: three compact raster panels with restrained labels.
-    # ------------------------------------------------------------------
+    # Latent field, image density, expected counts.
     fig, axes = plt.subplots(
         1,
         3,
@@ -420,10 +414,7 @@ def make_single_figures(out: dict[str, Any]) -> None:
     save_figure(fig, FIGDIR, "fig_world")
     plt.close(fig)
 
-    # ------------------------------------------------------------------
-    # Reliability: standard accuracy-versus-confidence geometry.
-    # Marker area is proportional to the number of observations in each bin.
-    # ------------------------------------------------------------------
+    # Reliability diagrams; marker size scales with bin count.
     evaluation = out["evaluation"]
     fig, axes = plt.subplots(
         1,
@@ -556,8 +547,7 @@ def make_single_figures(out: dict[str, Any]) -> None:
     clean_axis(axis)
 
     for axis in axes:
-        # A small data-space margin prevents markers at probabilities 0 or 1
-        # from being clipped by the axes boundary in PNG/PDF/SVG output.
+        # Pad x limits so edge markers are not clipped on export.
         axis.set_xlim(-0.02, 1.02)
         axis.set_ylim(-0.02, 1.02)
         axis.set_xticks([0, 0.5, 1.0])
@@ -568,9 +558,7 @@ def make_single_figures(out: dict[str, Any]) -> None:
     save_figure(fig, FIGDIR, "fig_reliability")
     plt.close(fig)
 
-    # ------------------------------------------------------------------
-    # Per-cell estimates and predictive intervals.
-    # ------------------------------------------------------------------
+    # Count estimates and predictive intervals.
     z_true = out["z_expected"]
     z_max = max(
         z_true.max(),
@@ -671,9 +659,7 @@ def make_single_figures(out: dict[str, Any]) -> None:
     save_figure(fig, FIGDIR, "fig_per_cell_estimates")
     plt.close(fig)
 
-    # ------------------------------------------------------------------
-    # Allocation maps: compact 2 x 3 layout with a dedicated colour bar.
-    # ------------------------------------------------------------------
+    # Allocation maps (2×3 grid + colour bar).
     fig, axes = plt.subplots(
         2,
         3,
@@ -921,13 +907,10 @@ def run_fit_size_sweep(n_seeds: int) -> list[dict[str, float]]:
 
 
 def run_asymmetric_cost_experiment(n_seeds: int) -> list[dict[str, float]]:
-    """Evaluate nominal and interval-stress operational loss.
+    """Compare point and upper-bound policies under asymmetric patrol cost.
 
-    For each missed-event cost, the point policy plans with the calibrated mean
-    count and the interval-robust policy plans with the predictive upper count.
-    Excess loss is measured relative to the field-specific oracle.  The upper
-    policy is consequently optimal for the upper-bound stress field, while its
-    nominal excess loss quantifies the price (or benefit) of robustness.
+    Point planning uses the calibrated mean count; upper-bound planning uses the
+    predictive upper count. Loss is measured against the field-specific oracle.
     """
     miss_costs = [0.10, 0.20, 0.50, 1.0, 2.0, 5.0, 10.0]
     raw_rows: dict[float, list[dict[str, float]]] = {

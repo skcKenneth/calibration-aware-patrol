@@ -129,12 +129,9 @@ test environment. No model download or GPU is required.
 
 ### Figure style
 
-The plotting code uses a compact editorial style suitable for two-column
-scientific manuscripts: restrained colour-blind-safe accents, lowercase panel
-labels, thin axes, outward ticks, and uncertainty bands for multi-seed results.
-The style is inspired by common Nature/Science figure conventions rather than
-being an exact copy of either journal's production template.  Shared settings
-are defined in `src/figure_style.py`.
+Figures use the shared settings in `src/figure_style.py`: single- or
+double-column widths, a colour-blind-safe palette, lowercase panel labels,
+thin outward ticks, and ±1 SD bands on multi-seed curves.
 
 ## Tests
 

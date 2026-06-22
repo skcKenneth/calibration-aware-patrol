@@ -1,20 +1,14 @@
 """Patrol-allocation objectives and policies.
 
-Two related decision models are provided.
+``water_fill`` maximises expected intercepted events under a fixed budget,
+``sum_i z_i * (1 - exp(-lambda*tau_i))``.
 
-``water_fill``
-    Uses a fixed patrol-hour budget and maximises expected intercepted events,
-    ``sum_i z_i * (1 - exp(-lambda*tau_i))``.
+``cost_sensitive_allocate`` may leave budget unused while minimising
 
-``cost_sensitive_allocate``
-    Allows the optimiser to leave part of a maximum budget unused and
-    minimises a dimensionally consistent operational loss,
+``miss_cost * sum_i z_i exp(-lambda*tau_i) + sum_i c_i tau_i``.
 
-    ``miss_cost * sum_i z_i exp(-lambda*tau_i) + sum_i c_i tau_i``.
-
-The upper-interval policy is therefore described as *predictive upper-bound*
-or *interval robust*.  It is not distributionally robust optimisation: no
-ambiguity set over probability distributions is constructed.
+The upper-interval policy is a predictive upper bound, not distributionally
+robust optimisation (no ambiguity set over distributions).
 """
 from __future__ import annotations
 

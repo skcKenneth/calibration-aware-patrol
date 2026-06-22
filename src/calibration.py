@@ -1,24 +1,14 @@
 """Post-hoc calibration, diagnostics, and count-prediction utilities.
 
-The implementation deliberately separates four roles:
+Fitting, metric evaluation, interval tuning, and deployment each use a
+different image batch from ``synthetic``. Patrol decisions use the final-class
+(human-presence risk-proxy) probability, so the module reports multiclass
+temperature-scaling metrics and a binary Platt calibrator for that class.
 
-* calibrators are fitted on ``temperature_fit`` images;
-* calibration metrics are reported on an independent ``evaluation`` batch;
-* interval width is checked on a separate ``interval_calibration`` batch;
-* patrol estimates and final coverage are computed on ``deployment`` images.
-
-For decision making, the relevant probability is the final (human-presence
-risk-proxy) class rather than only the top-label confidence.  The module
-therefore reports both multiclass temperature-scaling diagnostics and a
-binary Platt calibrator for the risk-proxy class.
-
-Base deployment count intervals use the exact Poisson-binomial distribution
-implied by the calibrated image-level probabilities.  A held-out,
-deployment-sized labelled batch then selects an integer expansion margin to
-protect against residual model misspecification.  The intervals target the
-*realised* number of risk-proxy events; they are not confidence intervals for
-the latent expected count and no distribution-free conformal guarantee is
-claimed.
+Cell-level count intervals come from the exact Poisson-binomial distribution of
+calibrated image probabilities. A held-out batch picks an integer expansion margin
+when the model is slightly misspecified. Intervals target realised event counts,
+not the latent expectation; no distribution-free conformal guarantee is claimed.
 """
 from __future__ import annotations
 
@@ -454,14 +444,11 @@ def calibrate_interval_expansion(
     realised: np.ndarray,
     alpha: float = 0.10,
 ) -> int:
-    """Choose an integer expansion margin on a held-out count batch.
+    """Pick a global integer margin from held-out count violations.
 
-    The score is the number of counts by which an observation falls outside
-    its base Poisson-binomial interval.  A finite-sample empirical quantile is
-    used to choose one global expansion margin.  This step is a pragmatic
-    calibration against residual misspecification; because spatial cells are
-    not asserted to be exchangeable, the function does not claim a formal
-    distribution-free conformal guarantee.
+    Scores how far each realised count falls outside its base Poisson-binomial
+    interval, then takes an empirical quantile. Cells are not assumed
+    exchangeable, so no distribution-free conformal guarantee is claimed.
     """
     if not 0 < alpha < 1:
         raise ValueError("alpha must lie in (0, 1)")

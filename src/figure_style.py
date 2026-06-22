@@ -1,9 +1,8 @@
-"""Editorial plotting helpers for publication-quality scientific figures.
+"""Matplotlib styling for manuscript figures.
 
-The style is intentionally restrained and journal-like: compact dimensions,
-colour-blind-safe accents, thin axes, outward ticks, panel labels, and vector
-output.  It is inspired by common Nature/Science figure conventions without
-copying any proprietary house template.
+Sets column widths, a colour-blind-safe palette, and light axis treatment
+(thin spines, outward ticks). The look follows common journal layouts rather
+than any one house style.
 """
 from __future__ import annotations
 
@@ -14,7 +13,7 @@ import matplotlib as mpl
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
 
-# Compact colour-blind-safe editorial palette.
+# Colour-blind-safe palette.
 COLORS = {
     "ink": "#222222",
     "grey": "#7A7A7A",
@@ -42,13 +41,13 @@ PATROL_CMAP = LinearSegmentedColormap.from_list(
     ["#FFFFFF", "#E8F2F0", "#B7D7D2", "#6AAFA6", "#006D6F"],
 )
 
-# Approximate journal widths.
+# Typical single- and double-column widths (inches).
 SINGLE_COLUMN = 3.70
 DOUBLE_COLUMN = 7.50
 
 
 def apply_editorial_style() -> None:
-    """Apply a compact journal-style Matplotlib configuration."""
+    """Set matplotlib rcParams for manuscript figures."""
     mpl.rcParams.update(
         {
             "figure.dpi": 130,
@@ -102,7 +101,7 @@ def apply_editorial_style() -> None:
 
 
 def clean_axis(axis: plt.Axes) -> None:
-    """Apply subtle axis styling while preserving data-specific formatting."""
+    """Thin spines and tick colours on one axes."""
     axis.spines["left"].set_linewidth(0.65)
     axis.spines["bottom"].set_linewidth(0.65)
     axis.tick_params(which="both", color=COLORS["ink"], labelcolor=COLORS["ink"])
@@ -129,12 +128,9 @@ def compact_legend(axis: plt.Axes, *, ncol: int = 1, **kwargs: object) -> None:
 
 
 def save_figure(fig: plt.Figure, directory: Path, stem: str) -> None:
-    """Save publication outputs without clipping labels or panel annotations.
+    """Save PNG, PDF, and SVG with a small padding margin.
 
-    ``bbox_inches='tight'`` alone can still crop artists that sit very close to
-    the canvas boundary, especially panel labels and long axis labels in SVG or
-    PDF output.  Drawing the canvas first and retaining a slightly larger pad
-    makes all three output formats consistent.
+    Draws the canvas first so panel labels near the edge are not clipped.
     """
     directory.mkdir(parents=True, exist_ok=True)
     fig.canvas.draw()

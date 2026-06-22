@@ -1,23 +1,19 @@
-"""Synthetic camera-trap network with disjoint data roles.
+"""Synthetic camera-trap network with separate data roles.
 
-The generator is designed for decision-stage calibration experiments.  A
-spatially correlated latent class-probability field is sampled once, then four
-*independent* image batches are generated from it:
+A spatially correlated latent probability field is drawn once. Four independent
+image batches are then sampled from it:
 
 ``temperature_fit``
-    Labelled images used only to fit post-hoc calibrators.
+    Labels for fitting post-hoc calibrators.
 ``evaluation``
-    Labelled images used only to report calibration metrics.
+    Labels for reporting calibration metrics.
 ``interval_calibration``
-    A deployment-sized labelled batch used only to calibrate predictive-interval
-    width under residual model misspecification.
+    Deployment-sized batch for tuning predictive-interval width.
 ``deployment``
-    Images whose probabilities are aggregated for patrol allocation.  Their
-    labels are retained by the simulator only for interval-coverage checks.
+    Probabilities aggregated for patrol allocation; labels kept for coverage checks.
 
-Keeping these roles disjoint prevents the optimistic reuse of calibration
-labels for evaluation.  The final class is a human-presence risk proxy; it
-must not be interpreted as a direct poacher label in a real deployment.
+Fit, evaluation, and deployment labels must not overlap. The threat class is a
+human-presence risk proxy, not a poacher label.
 """
 from __future__ import annotations
 
